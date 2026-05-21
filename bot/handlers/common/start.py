@@ -19,14 +19,13 @@ async def _build_menu_for_user(user: User, uow: UnitOfWork) -> dict:
         is_whitelisted = await uow.whitelist.is_whitelisted(
             user.telegram_id, user.username
         )
-    # TODO: replace with real course role queries when courses are implemented
-    has_teacher_courses = False
-    has_student_courses = False
+    teacher_courses = await uow.courses.get_courses_by_role(user.telegram_id, "owner")
+    student_courses = await uow.courses.get_courses_by_role(user.telegram_id, "student")
     return dict(
         user=user,
         is_whitelisted=is_whitelisted,
-        has_teacher_courses=has_teacher_courses,
-        has_student_courses=has_student_courses,
+        has_teacher_courses=len(teacher_courses) > 0,
+        has_student_courses=len(student_courses) > 0,
     )
 
 

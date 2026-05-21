@@ -10,6 +10,10 @@ from bot.handlers.admin import router as admin_router
 from bot.handlers.common.help import router as help_router
 from bot.handlers.common.profile import router as profile_router
 from bot.handlers.common.start import router as start_router
+from bot.handlers.teacher.courses import router as teacher_courses_router
+from bot.handlers.teacher.assignments import router as teacher_assignments_router
+from bot.handlers.student.courses import router as student_courses_router
+from bot.handlers.student.assignments import router as student_assignments_router
 from bot.middlewares.auth import AuthMiddleware
 from core.config import settings
 from db.base import engine
@@ -37,6 +41,10 @@ async def start_bot() -> None:
     dp.include_router(help_router)
     dp.include_router(profile_router)
     dp.include_router(admin_router)
+    dp.include_router(teacher_courses_router)
+    dp.include_router(teacher_assignments_router)
+    dp.include_router(student_courses_router)
+    dp.include_router(student_assignments_router)
 
     logger.info("Starting bot...")
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
