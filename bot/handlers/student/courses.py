@@ -120,7 +120,10 @@ async def _render_course_assignments(query: CallbackQuery, course_id: int, db_us
     async with uow_factory() as uow:
         course = await uow.courses.get_by_id(course_id)
         role = await uow.courses.get_role(db_user.telegram_id, course_id)
-        assignments = await uow.assignments.get_by_course(course_id)
+        assignments = [
+            a for a in await uow.assignments.get_by_course(course_id)
+            if not getattr(a, "is_private", False)
+        ]
         submissions = {
             s.assignment_id: s
             for s in await uow.submissions.get_by_assignment_list(

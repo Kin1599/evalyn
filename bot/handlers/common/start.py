@@ -1,4 +1,4 @@
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, ReplyKeyboardRemove
@@ -45,6 +45,21 @@ async def cmd_start(
             reply_markup=build_main_menu(**menu_kwargs),
         )
         return
+
+
+@router.message(F.text == "🎓 Открыть панель")
+async def btn_open_panel(message: Message, db_user: User | None, uow_factory) -> None:
+    if not db_user:
+        await message.answer("Сначала зарегистрируйтесь через /start.")
+        return
+
+    async with uow_factory() as uow:
+        menu_kwargs = await _build_menu_for_user(db_user, uow)
+
+    await message.answer(
+        "Панель открыта. Выберите действие:",
+        reply_markup=build_main_menu(**menu_kwargs),
+    )
 
     # New user — ask for display name
     tg_name = message.from_user.full_name or ""

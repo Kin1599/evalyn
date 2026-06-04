@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from db.repositories.sqlalchemy.assignment_repo import SQLAlchemyAssignmentRepository
 from db.repositories.sqlalchemy.course_repo import SQLAlchemyCourseRepository
+from db.repositories.sqlalchemy.review_repo import SQLAlchemyReviewRepository
 from db.repositories.sqlalchemy.submission_repo import SQLAlchemySubmissionRepository
 from db.repositories.sqlalchemy.user_repo import SQLAlchemyUserRepository
 from db.repositories.sqlalchemy.whitelist_repo import SQLAlchemyWhitelistRepository
@@ -21,6 +22,7 @@ class UnitOfWork:
         self.courses = SQLAlchemyCourseRepository(self._session)
         self.assignments = SQLAlchemyAssignmentRepository(self._session)
         self.submissions = SQLAlchemySubmissionRepository(self._session)
+        self.reviews = SQLAlchemyReviewRepository(self._session)
         return self
 
     async def __aexit__(

@@ -9,7 +9,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U evalyn"]
       interval: 5s
@@ -24,6 +24,21 @@ services:
       db:
         condition: service_healthy
 
+  sandbox:
+    build: .
+    command: python sandbox_service.py
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8001/health\")'"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   app:
     build: .
     restart: unless-stopped
@@ -31,6 +46,8 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      sandbox:
+        condition: service_healthy
 
 volumes:
   postgres_data:

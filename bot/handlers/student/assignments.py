@@ -1,3 +1,5 @@
+import io
+
 from aiogram import F, Router
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
@@ -10,6 +12,9 @@ from aiogram.types import (
 )
 
 from bot.states.submission import SubmissionStates
+from core.config import settings
+from agents.output_schema import AgentOutput
+from agents.reviewer import CodeReviewAgent
 from db.models.user import User
 
 router = Router()
@@ -40,6 +45,25 @@ def _assignment_detail_kb(assignment_id: int, course_id: int, has_submission: bo
     ])
 
 
+async def _resolve_submission_text_from_file(message: Message, file_id: str) -> str:
+    file = await message.bot.get_file(file_id)
+    buffer = io.BytesIO()
+    await message.bot.download_file(file.file_path, destination=buffer)
+    buffer.seek(0)
+    try:
+        text = buffer.read().decode("utf-8")
+        if text.strip():
+            return text
+    except UnicodeDecodeError:
+        pass
+
+    file_name = file.file_path.split("/")[-1] if file.file_path else file_id
+    return (
+        f"Прикреплён файл {file_name}. "
+        "Текстовый контент не удалось прочитать, но ревью будет выполнено по доступным данным."
+    )
+
+
 @router.callback_query(StudentAssignmentCD.filter(F.action == "view"))
 async def cb_assignment_view(query: CallbackQuery, callback_data: StudentAssignmentCD, db_user: User | None, uow_factory) -> None:
     if not db_user:
@@ -53,7 +77,7 @@ async def cb_assignment_view(query: CallbackQuery, callback_data: StudentAssignm
             db_user.telegram_id, callback_data.assignment_id
         )
 
-    if not assignment or not role or role.role != "student":
+    if not assignment or not role or role.role != "student" or getattr(assignment, "is_private", False):
         await query.answer("Нет доступа.", show_alert=True)
         return
 
@@ -93,9 +117,10 @@ async def cb_assignment_submit(query: CallbackQuery, callback_data: StudentAssig
         return
 
     async with uow_factory() as uow:
+        assignment = await uow.assignments.get_by_id(callback_data.assignment_id)
         role = await uow.courses.get_role(db_user.telegram_id, callback_data.course_id)
 
-    if not role or role.role != "student":
+    if not assignment or getattr(assignment, "is_private", False) or not role or role.role != "student":
         await query.answer("Нет доступа.", show_alert=True)
         return
 
@@ -143,7 +168,7 @@ async def process_submission(message: Message, state: FSMContext, db_user: User,
         return
 
     async with uow_factory() as uow:
-        await uow.submissions.upsert(
+        submission = await uow.submissions.upsert(
             student_id=db_user.telegram_id,
             assignment_id=assignment_id,
             content_text=content_text,
@@ -151,8 +176,50 @@ async def process_submission(message: Message, state: FSMContext, db_user: User,
         )
         await uow.commit()
 
+        review_started = False
+        submission_text = submission.content_text or ""
+        if not submission_text and submission.file_id:
+            submission_text = await _resolve_submission_text_from_file(message, submission.file_id)
+
+        if submission_text:
+            assignment = await uow.assignments.get_by_id(assignment_id)
+            if assignment:
+                agent = CodeReviewAgent(model=settings.default_agent_model)
+                result, raw_output = await agent.review_submission(
+                    assignment_title=assignment.title,
+                    assignment_description=assignment.description,
+                    assignment_criteria=assignment.criteria,
+                    submission_text=submission_text,
+                )
+                review = await uow.reviews.create(
+                    submission_id=submission.id,
+                    model=settings.default_agent_model,
+                    raw_output=raw_output,
+                    status="pending_moderation" if isinstance(result, AgentOutput) else "failed",
+                    overall_score=result.overall_score if isinstance(result, AgentOutput) else None,
+                    summary=result.summary if isinstance(result, AgentOutput) else str(result),
+                )
+                if isinstance(result, AgentOutput):
+                    for item in result.items:
+                        await uow.reviews.create_item(
+                            review_id=review.id,
+                            category=item.category,
+                            severity=item.severity,
+                            title=item.title,
+                            description=item.description,
+                            location=item.location,
+                            suggestion=item.suggestion,
+                        )
+                    await uow.submissions.update(submission.id, status="reviewed")
+                    review_started = True
+        await uow.commit()
+
     await state.clear()
     await message.answer(
-        "✅ Работа сдана! Преподаватель получит уведомление после проверки.",
+        "✅ Работа сдана!" + (
+            " Автоматическая проверка выполнена, преподаватель может подтвердить итоги и отправить фидбек студенту."
+            if review_started
+            else " Преподаватель получит уведомление после проверки."
+        ),
         reply_markup=ReplyKeyboardRemove(),
     )
