@@ -378,6 +378,9 @@ async def cb_assignment_view(query: CallbackQuery, callback_data: AssignmentCD, 
         f"{submission_info}"
     )
 
+    if getattr(assignment, "is_private", False):
+        text += "\n\n🔒 <b>Это приватное задание. Студенты не видят его в общем списке.</b>"
+
     buttons = []
     if submission_count:
         buttons.append([
@@ -390,6 +393,13 @@ async def cb_assignment_view(query: CallbackQuery, callback_data: AssignmentCD, 
             InlineKeyboardButton(
                 text="🤖 Проверить всё задание",
                 callback_data=AssignmentCD(action="review_all", assignment_id=callback_data.assignment_id, course_id=callback_data.course_id).pack(),
+            )
+        ])
+    if getattr(assignment, "is_private", False):
+        buttons.append([
+            InlineKeyboardButton(
+                text="🌐 Сделать публичным",
+                callback_data=AssignmentCD(action="make_public", assignment_id=callback_data.assignment_id, course_id=callback_data.course_id).pack(),
             )
         ])
     # allow owner to perform a test submission without being a student
@@ -435,6 +445,32 @@ async def cb_assignment_self_submit(query: CallbackQuery, callback_data: Assignm
         reply_markup=ReplyKeyboardRemove(),
     )
     await query.answer()
+
+
+@router.callback_query(AssignmentCD.filter(F.action == "make_public"))
+async def cb_assignment_make_public(query: CallbackQuery, callback_data: AssignmentCD, db_user: User | None, uow_factory) -> None:
+    if not db_user:
+        await query.answer()
+        return
+
+    async with uow_factory() as uow:
+        assignment = await uow.assignments.get_by_id(callback_data.assignment_id)
+        role = await uow.courses.get_role(db_user.telegram_id, callback_data.course_id)
+
+    if not assignment or not role or role.role != "owner":
+        await query.answer("Нет доступа.", show_alert=True)
+        return
+
+    if not getattr(assignment, "is_private", False):
+        await query.answer("Задание уже публичное.", show_alert=True)
+        return
+
+    async with uow_factory() as uow:
+        await uow.assignments.update(assignment.id, is_private=False)
+        await uow.commit()
+
+    await query.answer("Задание сделано публичным.")
+    await cb_assignment_view(query, callback_data, db_user, uow_factory)
 
 
 @router.callback_query(AssignmentCD.filter(F.action == "review_all"))
