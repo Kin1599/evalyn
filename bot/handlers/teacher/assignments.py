@@ -636,7 +636,7 @@ async def cb_submission_view(query: CallbackQuery, callback_data: SubmissionCD, 
 
 
 @router.callback_query(SubmissionCD.filter(F.action == "review"))
-async def cb_submission_review(query: CallbackQuery, callback_data: SubmissionCD, db_user: User | None, uow_factory) -> None:
+async def cb_submission_review(query: CallbackQuery, callback_data: SubmissionCD, db_user: User | None, state: FSMContext, uow_factory) -> None:
     if not db_user:
         await query.answer()
         return
@@ -655,16 +655,107 @@ async def cb_submission_review(query: CallbackQuery, callback_data: SubmissionCD
         await query.answer("Эта работа не содержит текста для анализа.", show_alert=True)
         return
 
-    await query.answer()
+    # Сохраняем данные для FSM
+    await state.set_state(ReviewEditStates.waiting_for_temperature)
+    await state.update_data(
+        assignment_id=assignment.id,
+        course_id=callback_data.course_id,
+        submission_id=submission.id,
+        submission_text=submission_text,
+    )
     await query.message.answer(
         "Выберите модель для проверки:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"Default ({settings.default_agent_model})", callback_data=ReviewModelCD(action="select", model=settings.default_agent_model, assignment_id=assignment.id, course_id=callback_data.course_id, submission_id=submission.id).pack())],
-            [InlineKeyboardButton(text="Qwen Code (qwen/qwen3-coder:free)", callback_data=ReviewModelCD(action="select", model="qwen/qwen3-coder:free", assignment_id=assignment.id, course_id=callback_data.course_id, submission_id=submission.id).pack())],
-            [InlineKeyboardButton(text="gpt-4o-mini", callback_data=ReviewModelCD(action="select", model="openai/gpt-4o-mini", assignment_id=assignment.id, course_id=callback_data.course_id, submission_id=submission.id).pack())],
-            [InlineKeyboardButton(text="Отменить", callback_data=SubmissionCD(action="view", assignment_id=assignment.id, course_id=callback_data.course_id, submission_id=submission.id).pack())],
+            [InlineKeyboardButton(text=f"Default ({settings.default_agent_model})", callback_data="model|{0}".format(settings.default_agent_model))],
+            [InlineKeyboardButton(text="Qwen Code (qwen/qwen3-coder:free)", callback_data="model|qwen/qwen3-coder:free")],
+            [InlineKeyboardButton(text="gpt-4o-mini", callback_data="model|openai/gpt-4o-mini")],
         ])
     )
+
+# FSM: выбор модели и температуры
+@router.callback_query(lambda c: c.data and c.data.startswith("model|"), ReviewEditStates.waiting_for_temperature)
+async def cb_choose_model(query: CallbackQuery, state: FSMContext) -> None:
+    model = query.data.split("|", 1)[1]
+    await state.update_data(model=model)
+    await state.set_state(ReviewEditStates.waiting_for_system_prompt)
+    await query.message.answer(
+        "Выберите температуру генерации (чем выше — тем креативнее, но менее предсказуемо):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="0.2 (по умолчанию)", callback_data="temp|0.2")],
+            [InlineKeyboardButton(text="0.5", callback_data="temp|0.5")],
+            [InlineKeyboardButton(text="0.8", callback_data="temp|0.8")],
+        ])
+    )
+    await query.answer()
+
+@router.callback_query(lambda c: c.data and c.data.startswith("temp|"), ReviewEditStates.waiting_for_system_prompt)
+async def cb_choose_temperature(query: CallbackQuery, state: FSMContext) -> None:
+    temperature = float(query.data.split("|", 1)[1])
+    await state.update_data(temperature=temperature)
+    await state.set_state(ReviewEditStates.waiting_for_system_prompt)
+    await query.message.answer(
+        "Введите system prompt для агента (или отправьте - для значения по умолчанию):"
+    )
+    await query.answer()
+
+@router.message(ReviewEditStates.waiting_for_system_prompt)
+async def cb_enter_system_prompt(message: Message, state: FSMContext, db_user: User | None, uow_factory) -> None:
+    data = await state.get_data()
+    model = data.get("model", settings.default_agent_model)
+    temperature = data.get("temperature", 0.2)
+    system_prompt = message.text.strip() if message.text and message.text.strip() != "-" else None
+    assignment_id = data["assignment_id"]
+    course_id = data["course_id"]
+    submission_id = data["submission_id"]
+    submission_text = data["submission_text"]
+
+    async with uow_factory() as uow:
+        assignment = await uow.assignments.get_by_id(assignment_id)
+        submission = await uow.submissions.get_by_id(submission_id)
+    # Передаём параметры в агент
+    agent = CodeReviewAgent(model=model, temperature=temperature, system_prompt=system_prompt)
+    result, raw_output = await agent.review_submission(
+        assignment_title=assignment.title,
+        assignment_description=assignment.description,
+        assignment_criteria=assignment.criteria,
+        submission_text=submission_text,
+        system_prompt=system_prompt,
+    )
+
+    async with uow_factory() as uow:
+        review = await uow.reviews.create(
+            submission_id=submission.id,
+            model=model,
+            raw_output=raw_output,
+            status="pending_moderation" if isinstance(result, AgentOutput) else "failed",
+            overall_score=result.overall_score if isinstance(result, AgentOutput) else None,
+            summary=result.summary if isinstance(result, AgentOutput) else str(result),
+            temperature=temperature,
+            system_prompt=system_prompt,
+        )
+        if isinstance(result, AgentOutput):
+            for item in result.items:
+                await uow.reviews.create_item(
+                    review_id=review.id,
+                    category=item.category,
+                    severity=item.severity,
+                    title=item.title,
+                    description=item.description,
+                    location=item.location,
+                    suggestion=item.suggestion,
+                )
+            await uow.submissions.update(submission.id, status="reviewed")
+        await uow.commit()
+
+    await state.clear()
+    if isinstance(result, AgentOutput):
+        await message.answer(
+            f"Ревью выполнено (модель: {model}, температура: {temperature}).\nМожете просмотреть результаты.",
+        )
+    else:
+        await message.answer(
+            "⚠️ Agent returned an unexpected response:\n" + str(result),
+        )
 
 
 @router.callback_query(SubmissionCD.filter(F.action == "review_summary"))
