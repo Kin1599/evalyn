@@ -1,0 +1,68 @@
+{
+    "rule_id": "lab_networks",
+    "stop_on_error": false,
+    "blocks": [
+        {
+            "id": "block_er",
+            "description": "Проверка создания ER-графа",
+            "inputs": [
+                {
+                    "alias": "G_er",
+                    "type": "variable",
+                    "search_strategy": "auto",
+                    "constraints": {
+                        "type": "networkx.Graph",
+                        "attrs": {"number_of_nodes": 500},
+                        "value_ranges": {}
+                    },
+                    "search_scope": "all"
+                }
+            ],
+            "conditions": [
+                {
+                    "type": "expression",
+                    "expression": "G_er.number_of_nodes() == 500",
+                    "expected": true,
+                    "tolerance": 0.0,
+                    "message": "Количество вершин не равно 500"
+                },
+                {
+                    "type": "llm",
+                    "prompt_template": "Оцени, является ли граф ER-графом. Параметры: n=500, p~0.016. Граф имеет {G_er}",
+                    "context_sources": ["G_er"],
+                    "output_type": "annotations"
+                }
+            ]
+        },
+        {
+            "id": "block_metrics",
+            "description": "Проверка метрик графа",
+            "inputs": [
+                {
+                    "alias": "metrics_er",
+                    "type": "variable",
+                    "search_strategy": "rule",
+                    "constraints": {
+                        "type": "dict",
+                        "dict_keys": ["avg_degree", "clustering"]
+                    },
+                    "search_scope": "all"
+                }
+            ],
+            "conditions": [
+                {
+                    "type": "expression",
+                    "expression": "abs(metrics_er['avg_degree'] - 8) < 1.5",
+                    "expected": true,
+                    "tolerance": 0.0,
+                    "message": "Средняя степень вне допустимого диапазона [6.5, 9.5]"
+                },
+                {
+                    "type": "script",
+                    "script": "# Проверка, что кластеризация разумна\nif 'metrics_er' in dir():\n    if metrics_er['clustering'] > 0.1:\n        check.annotate('warning', 'Коэффициент кластеризации подозрительно высокий для ER-графа', None)\n    elif metrics_er['clustering'] < 0.001:\n        check.annotate('warning', 'Коэффициент кластеризации подозрительно низкий', None)\n    else:\n        check.annotate('positive', f'Коэффициент кластеризации {metrics_er[\"clustering\"]:.4f} выглядит разумным', None)\nelse:\n    check.annotate('error', 'Переменная metrics_er не найдена', None)\n",
+                    "generated": false
+                }
+            ]
+        }
+    ]
+}
