@@ -182,8 +182,7 @@ async def process_submission(message: Message, state: FSMContext, db_user: User,
 
     await state.clear()
     await message.answer(
-        "✅ Работа сдана!" + (
-            "Проверка выполнена, преподаватель может подтвердить итоги и отправить фидбек студенту."
-        ),
+        "✅ Работа принята и поставлена в очередь на проверку. "
+        "Дождитесь фидбека преподавателя.",
         reply_markup=ReplyKeyboardRemove(),
     )

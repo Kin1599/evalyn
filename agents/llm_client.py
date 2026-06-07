@@ -5,6 +5,16 @@ from typing import Any
 import httpx
 
 from core.config import settings
+from core.models_registry import FREE_MODEL_IDS
+
+_OPENROUTER_SEMAPHORE = asyncio.Semaphore(1)
+
+
+def _candidate_models(model: str) -> list[str]:
+    candidates = [model]
+    if model in FREE_MODEL_IDS or model == "openrouter/free":
+        candidates.extend(model_id for model_id in FREE_MODEL_IDS if model_id != model)
+    return list(dict.fromkeys(candidates))
 
 
 async def chat(model: str, messages: list[dict], temperature: float = 0.0, max_tokens: int = 1200) -> str:
@@ -16,43 +26,53 @@ async def chat(model: str, messages: list[dict], temperature: float = 0.0, max_t
 
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {"Authorization": f"Bearer {settings.openrouter_api_key}", "Content-Type": "application/json"}
-    payload: dict[str, Any] = {
-        "model": model,
+    base_payload: dict[str, Any] = {
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with _OPENROUTER_SEMAPHORE, httpx.AsyncClient(timeout=60.0) as client:
         last_response: httpx.Response | None = None
-        for attempt in range(3):
-            try:
-                resp = await client.post(url, headers=headers, json=payload)
-            except Exception as exc:  # network/connection errors
-                if attempt == 2:
-                    raise RuntimeError(f"OpenRouter request failed: {exc}") from exc
-                await asyncio.sleep(2 ** attempt)
+        last_error: Exception | None = None
+        for candidate_model in _candidate_models(model):
+            payload = {**base_payload, "model": candidate_model}
+            for attempt in range(2):
+                try:
+                    resp = await client.post(url, headers=headers, json=payload)
+                except Exception as exc:  # network/connection errors
+                    last_error = exc
+                    if attempt == 1:
+                        break
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+
+                last_response = resp
+                if resp.status_code == 429:
+                    retry_after = resp.headers.get("Retry-After")
+                    wait_seconds = 5.0
+                    if retry_after:
+                        try:
+                            wait_seconds = min(float(retry_after), 15.0)
+                        except ValueError:
+                            wait_seconds = 5.0
+                    await asyncio.sleep(wait_seconds)
+                    break
+
+                if resp.status_code != 200:
+                    body_text = resp.text
+                    raise RuntimeError(f"OpenRouter returned {resp.status_code}: {body_text}")
+                break
+            else:
                 continue
 
-            last_response = resp
-            if resp.status_code == 429 and attempt < 2:
-                retry_after = resp.headers.get("Retry-After")
-                wait_seconds = 15.0
-                if retry_after:
-                    try:
-                        wait_seconds = float(retry_after)
-                    except ValueError:
-                        wait_seconds = 15.0
-                await asyncio.sleep(wait_seconds)
-                continue
-
-            if resp.status_code != 200:
-                body_text = resp.text
-                raise RuntimeError(f"OpenRouter returned {resp.status_code}: {body_text}")
-            break
+            if last_response is not None and last_response.status_code == 200:
+                break
         else:
             if last_response is not None:
                 raise RuntimeError(f"OpenRouter returned {last_response.status_code}: {last_response.text}")
+            if last_error is not None:
+                raise RuntimeError(f"OpenRouter request failed: {last_error}") from last_error
             raise RuntimeError("OpenRouter request failed without a response.")
 
     data = resp.json()

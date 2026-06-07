@@ -32,6 +32,7 @@ async def run_code_review(
         assignment_description=assignment_description,
         assignment_criteria=assignment_criteria,
         submission_text=submission_text,
+        system_prompt=system_prompt,
     )
     return ReviewExecutionResult(outcome=outcome, raw_output=raw_output)
 
