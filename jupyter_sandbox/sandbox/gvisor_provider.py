@@ -113,7 +113,8 @@ class GVisorProvider:
         # Уникальное имя контейнера (например, на основе PID или таймстампа)
         container_name = f"sandbox_{os.getpid()}_{int(time.time())}"
 
-        orchestrator_path = os.path.realpath('sandbox/kernel_orchestrator.py')
+        #orchestrator_path = os.path.realpath('sandbox/kernel_orchestrator.py')
+        orchestrator_path = os.path.dirname(os.path.abspath(__file__)).removesuffix('/gvisor_provider.py') + '/kernel_orchestrator.py'
         # Команда Docker
         cmd = [
             "docker", "run",
