@@ -1,4 +1,5 @@
 import json
+import asyncio
 from typing import Any
 
 import httpx
@@ -23,15 +24,36 @@ async def chat(model: str, messages: list[dict], temperature: float = 0.0, max_t
     }
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        try:
-            resp = await client.post(url, headers=headers, json=payload)
-        except Exception as exc:  # network/connection errors
-            raise RuntimeError(f"OpenRouter request failed: {exc}") from exc
+        last_response: httpx.Response | None = None
+        for attempt in range(3):
+            try:
+                resp = await client.post(url, headers=headers, json=payload)
+            except Exception as exc:  # network/connection errors
+                if attempt == 2:
+                    raise RuntimeError(f"OpenRouter request failed: {exc}") from exc
+                await asyncio.sleep(2 ** attempt)
+                continue
 
-    if resp.status_code != 200:
-        # Try to include body for debugging
-        body_text = resp.text
-        raise RuntimeError(f"OpenRouter returned {resp.status_code}: {body_text}")
+            last_response = resp
+            if resp.status_code == 429 and attempt < 2:
+                retry_after = resp.headers.get("Retry-After")
+                wait_seconds = 15.0
+                if retry_after:
+                    try:
+                        wait_seconds = float(retry_after)
+                    except ValueError:
+                        wait_seconds = 15.0
+                await asyncio.sleep(wait_seconds)
+                continue
+
+            if resp.status_code != 200:
+                body_text = resp.text
+                raise RuntimeError(f"OpenRouter returned {resp.status_code}: {body_text}")
+            break
+        else:
+            if last_response is not None:
+                raise RuntimeError(f"OpenRouter returned {last_response.status_code}: {last_response.text}")
+            raise RuntimeError("OpenRouter request failed without a response.")
 
     data = resp.json()
     # Expecting OpenAI-compatible response
