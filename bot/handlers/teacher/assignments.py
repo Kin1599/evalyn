@@ -315,24 +315,32 @@ async def _run_review_for_submission(
     if not submission_text:
         return False, f"submission {submission.id}: нет текста и файла"
 
+    await uow.submissions.update(submission.id, status="reviewing")
+    await uow.commit()
     logger.info(
         "Starting manual review for submission_id=%s assignment_id=%s model=%s",
         submission.id,
         getattr(assignment, "id", None),
         model,
     )
-    review_result = await run_assignment_review(
-        assignment=assignment,
-        submission_text=submission_text,
-        model=model,
-    )
-    review = await store_review(
-        uow=uow,
-        submission=submission,
-        model=model,
-        result=review_result.outcome,
-        raw_output=review_result.raw_output,
-    )
+    try:
+        review_result = await run_assignment_review(
+            assignment=assignment,
+            submission_text=submission_text,
+            model=model,
+        )
+        review = await store_review(
+            uow=uow,
+            submission=submission,
+            model=model,
+            result=review_result.outcome,
+            raw_output=review_result.raw_output,
+        )
+    except Exception:
+        await uow.submissions.update(submission.id, status="pending")
+        await uow.commit()
+        logger.exception("Manual review failed for submission_id=%s", submission.id)
+        raise
     logger.info(
         "Finished manual review for submission_id=%s review_id=%s status=%s",
         submission.id,
@@ -408,6 +416,8 @@ class SubmissionCD(CallbackData, prefix="submission"):
 def _submission_status_label(submission: Submission) -> str:
     if submission.status == "pending":
         return "на проверке"
+    if submission.status == "reviewing":
+        return "проверяется сейчас"
     if submission.status == "reviewed":
         return "проверено"
     if submission.status == "feedback_sent":
@@ -850,6 +860,10 @@ async def cb_assignment_review_now(query: CallbackQuery, callback_data: Assignme
         return
 
     await query.answer("Запускаю проверку сейчас…")
+    await query.message.answer(
+        f"🔎 Проверка запущена для {len(pending_submissions)} работ. "
+        "Пожалуйста, не запускайте её повторно до завершения."
+    )
     messages = []
     async with uow_factory() as uow:
         for submission in pending_submissions:
@@ -1009,6 +1023,9 @@ async def cb_submission_review(query: CallbackQuery, callback_data: SubmissionCD
     if not submission or not assignment or not role or role.role != "owner":
         await query.answer("Нет доступа.", show_alert=True)
         return
+    if submission.status == "reviewing":
+        await query.answer("Эта работа уже проверяется.", show_alert=True)
+        return
 
     submission_text = await _resolve_submission_text(query, submission)
     if not submission_text:
@@ -1017,28 +1034,44 @@ async def cb_submission_review(query: CallbackQuery, callback_data: SubmissionCD
 
     await query.answer("Запускаю проверку сейчас")
     review_model = assignment.review_model or settings.default_agent_model
+    async with uow_factory() as uow:
+        await uow.submissions.update(submission.id, status="reviewing")
+        await uow.commit()
+    await query.message.answer(
+        "🔎 Проверка работы запущена. "
+        "Пока она идёт, повторный запуск будет заблокирован."
+    )
     logger.info(
         "Starting single submission review submission_id=%s assignment_id=%s model=%s",
         submission.id,
         assignment.id,
         review_model,
     )
-    review_result = await run_assignment_review(
-        assignment=assignment,
-        submission_text=submission_text,
-        model=review_model,
-        temperature=assignment.review_temperature or 0.2,
-        system_prompt=assignment.review_system_prompt,
-    )
-    async with uow_factory() as uow:
-        review = await store_review(
-            uow=uow,
-            submission=submission,
+    try:
+        review_result = await run_assignment_review(
+            assignment=assignment,
+            submission_text=submission_text,
             model=review_model,
-            result=review_result.outcome,
-            raw_output=review_result.raw_output,
+            temperature=assignment.review_temperature or 0.2,
+            system_prompt=assignment.review_system_prompt,
         )
-        await uow.commit()
+        async with uow_factory() as uow:
+            fresh_submission = await uow.submissions.get_by_id(submission.id)
+            review = await store_review(
+                uow=uow,
+                submission=fresh_submission,
+                model=review_model,
+                result=review_result.outcome,
+                raw_output=review_result.raw_output,
+            )
+            await uow.commit()
+    except Exception:
+        async with uow_factory() as uow:
+            await uow.submissions.update(submission.id, status="pending")
+            await uow.commit()
+        logger.exception("Single submission review failed for submission_id=%s", submission.id)
+        await query.message.answer("⚠️ Проверка не завершилась. Работа возвращена в очередь.")
+        raise
     logger.info(
         "Finished single submission review submission_id=%s review_id=%s status=%s",
         submission.id,

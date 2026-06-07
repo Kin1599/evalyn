@@ -20,7 +20,9 @@ router = Router()
 
 _STATUS_LABEL = {
     "pending": "⏳ На проверке",
+    "reviewing": "🔎 Проверяется сейчас",
     "reviewed": "✅ Проверено",
+    "feedback_sent": "📩 Фидбек отправлен",
 }
 
 

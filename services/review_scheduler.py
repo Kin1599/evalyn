@@ -28,21 +28,29 @@ async def process_pending_assignment_reviews(uow_factory) -> int:
                 continue
             if not submission_text:
                 continue
-            review_result = await run_assignment_review(
-                assignment=assignment,
-                submission_text=submission_text,
-                model=assignment.review_model or settings.default_agent_model,
-                temperature=assignment.review_temperature or 0.2,
-                system_prompt=assignment.review_system_prompt,
-            )
-            await store_review(
-                uow=uow,
-                submission=submission,
-                model=assignment.review_model or settings.default_agent_model,
-                result=review_result.outcome,
-                raw_output=review_result.raw_output,
-            )
-            processed += 1
+            await uow.submissions.update(submission.id, status="reviewing")
+            await uow.commit()
+            try:
+                review_result = await run_assignment_review(
+                    assignment=assignment,
+                    submission_text=submission_text,
+                    model=assignment.review_model or settings.default_agent_model,
+                    temperature=assignment.review_temperature or 0.2,
+                    system_prompt=assignment.review_system_prompt,
+                )
+                await store_review(
+                    uow=uow,
+                    submission=submission,
+                    model=assignment.review_model or settings.default_agent_model,
+                    result=review_result.outcome,
+                    raw_output=review_result.raw_output,
+                )
+                processed += 1
+            except Exception:
+                await uow.submissions.update(submission.id, status="pending")
+                await uow.commit()
+                logger.exception("Failed scheduled review for submission_id=%s", submission.id)
+                continue
 
         await uow.commit()
     return processed
