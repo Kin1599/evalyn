@@ -16,6 +16,8 @@ class Review(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending_moderation")
     overall_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    strengths_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    weaknesses_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     teacher_feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
     feedback_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(

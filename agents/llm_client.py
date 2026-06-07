@@ -1,5 +1,6 @@
 import json
 import asyncio
+import logging
 from typing import Any
 
 import httpx
@@ -8,6 +9,7 @@ from core.config import settings
 from core.models_registry import FREE_MODEL_IDS
 
 _OPENROUTER_SEMAPHORE = asyncio.Semaphore(1)
+logger = logging.getLogger(__name__)
 
 
 def _candidate_models(model: str) -> list[str]:
@@ -39,6 +41,7 @@ async def chat(model: str, messages: list[dict], temperature: float = 0.0, max_t
             payload = {**base_payload, "model": candidate_model}
             for attempt in range(2):
                 try:
+                    logger.info("OpenRouter request model=%s attempt=%s", candidate_model, attempt + 1)
                     resp = await client.post(url, headers=headers, json=payload)
                 except Exception as exc:  # network/connection errors
                     last_error = exc
@@ -49,6 +52,7 @@ async def chat(model: str, messages: list[dict], temperature: float = 0.0, max_t
 
                 last_response = resp
                 if resp.status_code == 429:
+                    logger.warning("OpenRouter 429 model=%s; trying fallback if available", candidate_model)
                     retry_after = resp.headers.get("Retry-After")
                     wait_seconds = 5.0
                     if retry_after:

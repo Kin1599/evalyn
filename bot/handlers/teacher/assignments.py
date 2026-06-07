@@ -1,5 +1,7 @@
 import html
 import io
+import json
+import logging
 from datetime import datetime, timezone
 
 from aiogram import F, Router
@@ -29,6 +31,7 @@ from db.models.user import User
 from services.review_service import run_assignment_review, store_review
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 _SKIP_KB = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text="Пропустить")]],
@@ -92,11 +95,179 @@ def _back_to_assignment_kb(assignment_id: int, course_id: int) -> InlineKeyboard
     ]])
 
 
+def _draft_feedback_kb(review_id: int, submission_id: int, assignment_id: int, course_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="✅ Принять и отправить черновик",
+            callback_data=SubmissionCD(
+                action="send_draft_feedback",
+                assignment_id=assignment_id,
+                course_id=course_id,
+                submission_id=submission_id,
+                review_id=review_id,
+            ).pack(),
+        )],
+        [InlineKeyboardButton(
+            text="← Назад к результатам",
+            callback_data=SubmissionCD(
+                action="review_summary",
+                assignment_id=assignment_id,
+                course_id=course_id,
+                submission_id=submission_id,
+                review_id=review_id,
+            ).pack(),
+        )],
+    ])
+
+
 async def _safe_query_answer(query: CallbackQuery) -> None:
     try:
         await query.answer()
     except TelegramBadRequest:
         pass
+
+
+def _review_json_list(review, field_name: str) -> list[str]:
+    raw_value = getattr(review, field_name, None)
+    if not raw_value:
+        return []
+    try:
+        value = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item).strip()]
+
+
+def _review_strengths(review) -> list[str]:
+    return _review_json_list(review, "strengths_json")
+
+
+def _review_weaknesses(review) -> list[str]:
+    return _review_json_list(review, "weaknesses_json")
+
+
+def _suggest_feedback_text(review, items: list) -> str:
+    lines = []
+    if review.overall_score is not None:
+        lines.append(f"Оценка: {review.overall_score:.1f}/10.")
+    if review.summary:
+        lines.append(review.summary)
+    strengths = _review_strengths(review)
+    if strengths:
+        lines.append("Сильные стороны: " + "; ".join(strengths[:3]) + ".")
+    weaknesses = _review_weaknesses(review)
+    if weaknesses:
+        lines.append("Что стоит доработать: " + "; ".join(weaknesses[:3]) + ".")
+    elif items:
+        lines.append("Что стоит доработать: " + "; ".join(item.title for item in items[:3]) + ".")
+    return "\n".join(lines).strip()
+
+
+async def _finalize_and_send_feedback(
+    *,
+    bot,
+    uow_factory,
+    review_id: int,
+    submission_id: int,
+    feedback_text: str,
+) -> tuple[bool, str]:
+    review_items = []
+    student_telegram_id = None
+
+    async with uow_factory() as uow:
+        review = await uow.reviews.get_by_id(review_id)
+        submission = await uow.submissions.get_by_id(submission_id)
+        student = await uow.users.get_by_telegram_id(submission.student_id) if submission else None
+        student_telegram_id = student.telegram_id if student else None
+        if review:
+            review_items = await uow.reviews.get_items_by_review(review.id)
+
+        if review:
+            await uow.reviews.update(
+                review.id,
+                teacher_feedback=feedback_text,
+                feedback_sent_at=datetime.now(timezone.utc),
+                status="finalized",
+            )
+        if submission:
+            await uow.submissions.update(submission.id, status="feedback_sent")
+        await uow.commit()
+
+    if not student_telegram_id:
+        return False, "Фидбек сохранён, но студент не найден в базе."
+
+    score_line = ""
+    if review and review.overall_score is not None:
+        score_line = f"\n<b>Оценка:</b> {review.overall_score:.1f}/10\n"
+    summary_line = ""
+    if review and review.summary:
+        summary_line = f"\n<b>Итог проверки:</b>\n{html.escape(review.summary)}\n"
+    strengths = _review_strengths(review)
+    weaknesses = _review_weaknesses(review)
+
+    feedback_lines = [
+        "📩 <b>Ваша работа проверена!</b>\n",
+        score_line,
+        summary_line,
+        f"<b>Комментарий преподавателя:</b>\n{html.escape(feedback_text)}\n",
+    ]
+
+    if strengths:
+        feedback_lines.append("\n<b>Сильные стороны:</b>\n")
+        for strength in strengths:
+            feedback_lines.append(f"• {html.escape(strength)}\n")
+
+    if weaknesses:
+        feedback_lines.append("\n<b>Слабые стороны:</b>\n")
+        for weakness in weaknesses:
+            feedback_lines.append(f"• {html.escape(weakness)}\n")
+
+    if review_items:
+        feedback_lines.append("\n<b>Что стоит доработать:</b>\n")
+        for item in review_items:
+            severity_icon = {
+                "error": "❌",
+                "warning": "⚠️",
+                "suggestion": "💡",
+            }.get(item.severity, "📌")
+
+            feedback_lines.append(
+                f"{severity_icon} <b>{html.escape(item.category)}</b>: {html.escape(item.title)}\n"
+            )
+            if item.description:
+                feedback_lines.append(f"   {html.escape(item.description)}\n")
+            if item.location:
+                feedback_lines.append(f"   <i>📍 {html.escape(item.location)}</i>\n")
+            if item.suggestion:
+                feedback_lines.append(f"   💡 {html.escape(item.suggestion)}\n")
+            feedback_lines.append("\n")
+
+    full_message = "".join(feedback_lines)
+    if len(full_message) > 4000:
+        summary_msg = "".join(feedback_lines[:3])
+        await bot.send_message(student_telegram_id, summary_msg, parse_mode=ParseMode.HTML)
+
+        current_chunk = []
+        current_length = 0
+        for line in feedback_lines[3:]:
+            line_length = len(line)
+            if current_length + line_length > 4000:
+                if current_chunk:
+                    await bot.send_message(student_telegram_id, "".join(current_chunk), parse_mode=ParseMode.HTML)
+                current_chunk = [line]
+                current_length = line_length
+            else:
+                current_chunk.append(line)
+                current_length += line_length
+
+        if current_chunk:
+            await bot.send_message(student_telegram_id, "".join(current_chunk), parse_mode=ParseMode.HTML)
+    else:
+        await bot.send_message(student_telegram_id, full_message, parse_mode=ParseMode.HTML)
+
+    return True, "Фидбек отправлен студенту."
 
 
 async def _resolve_submission_text(query: CallbackQuery, submission: Submission) -> str:
@@ -144,6 +315,12 @@ async def _run_review_for_submission(
     if not submission_text:
         return False, f"submission {submission.id}: нет текста и файла"
 
+    logger.info(
+        "Starting manual review for submission_id=%s assignment_id=%s model=%s",
+        submission.id,
+        getattr(assignment, "id", None),
+        model,
+    )
     review_result = await run_assignment_review(
         assignment=assignment,
         submission_text=submission_text,
@@ -155,6 +332,12 @@ async def _run_review_for_submission(
         model=model,
         result=review_result.outcome,
         raw_output=review_result.raw_output,
+    )
+    logger.info(
+        "Finished manual review for submission_id=%s review_id=%s status=%s",
+        submission.id,
+        review.id,
+        review.status,
     )
     return True, f"submission {submission.id}: {review.status}"
 
@@ -834,6 +1017,12 @@ async def cb_submission_review(query: CallbackQuery, callback_data: SubmissionCD
 
     await query.answer("Запускаю проверку сейчас")
     review_model = assignment.review_model or settings.default_agent_model
+    logger.info(
+        "Starting single submission review submission_id=%s assignment_id=%s model=%s",
+        submission.id,
+        assignment.id,
+        review_model,
+    )
     review_result = await run_assignment_review(
         assignment=assignment,
         submission_text=submission_text,
@@ -850,6 +1039,12 @@ async def cb_submission_review(query: CallbackQuery, callback_data: SubmissionCD
             raw_output=review_result.raw_output,
         )
         await uow.commit()
+    logger.info(
+        "Finished single submission review submission_id=%s review_id=%s status=%s",
+        submission.id,
+        review.id,
+        review.status,
+    )
 
     await query.message.answer(
         f"Проверка завершена для работы #{submission.id}.",
@@ -896,12 +1091,20 @@ async def cb_submission_review_summary(query: CallbackQuery, callback_data: Subm
         status_label += " / feedback sent"
 
     score_text = f"{review.overall_score:.1f}/10" if review.overall_score is not None else "n/a"
+    strengths = _review_strengths(review)
+    strengths_text = ""
+    if strengths:
+        strengths_text = "\n\n<b>Strengths:</b>\n" + "\n".join(f"• {html.escape(strength)}" for strength in strengths)
+    weaknesses = _review_weaknesses(review)
+    weaknesses_text = ""
+    if weaknesses:
+        weaknesses_text = "\n\n<b>Weaknesses:</b>\n" + "\n".join(f"• {html.escape(weakness)}" for weakness in weaknesses)
     feedback_note = f"\n\n<b>Teacher feedback:</b> {html.escape(review.teacher_feedback)}" if review.teacher_feedback else ""
     text = (
         f"🧾 <b>Review summary</b>\n"
         f"Status: <b>{status_label}</b>\n"
         f"Score: <b>{score_text}</b>\n\n"
-        f"{html.escape(review.summary or '')}{feedback_note}\n\n"
+        f"{html.escape(review.summary or '')}{strengths_text}{weaknesses_text}{feedback_note}\n\n"
         f"<b>Items:</b>\n{chr(10).join(item_lines)}"
     )
 
@@ -1060,6 +1263,7 @@ async def cb_submission_send_feedback(query: CallbackQuery, callback_data: Submi
         submission = await uow.submissions.get_by_id(callback_data.submission_id)
         role = await uow.courses.get_role(db_user.telegram_id, callback_data.course_id)
         review = await uow.reviews.get_latest_by_submission(callback_data.submission_id)
+        items = await uow.reviews.get_items_by_review(review.id) if review else []
 
     if not submission or not role or role.role != "owner" or not review:
         await query.answer("Нет доступа или обзор не найден.", show_alert=True)
@@ -1072,11 +1276,57 @@ async def cb_submission_send_feedback(query: CallbackQuery, callback_data: Submi
         assignment_id=callback_data.assignment_id,
         course_id=callback_data.course_id,
     )
+    suggested_feedback = _suggest_feedback_text(review, items)
+    suggestion_block = f"\n\n<b>Черновик фидбека:</b>\n{html.escape(suggested_feedback)}" if suggested_feedback else ""
     await query.message.answer(
-        "Введите финальный фидбек студенту:",
-        reply_markup=ReplyKeyboardRemove(),
+        "Введите финальный фидбек студенту."
+        f"{suggestion_block}",
+        reply_markup=_draft_feedback_kb(
+            review_id=review.id,
+            submission_id=submission.id,
+            assignment_id=callback_data.assignment_id,
+            course_id=callback_data.course_id,
+        ),
     )
     await query.answer()
+
+
+@router.callback_query(SubmissionCD.filter(F.action == "send_draft_feedback"))
+async def cb_submission_send_draft_feedback(query: CallbackQuery, callback_data: SubmissionCD, db_user: User | None, state: FSMContext, uow_factory) -> None:
+    if not db_user:
+        await query.answer()
+        return
+
+    async with uow_factory() as uow:
+        submission = await uow.submissions.get_by_id(callback_data.submission_id)
+        role = await uow.courses.get_role(db_user.telegram_id, callback_data.course_id)
+        review = await uow.reviews.get_latest_by_submission(callback_data.submission_id)
+        items = await uow.reviews.get_items_by_review(review.id) if review else []
+
+    if not submission or not role or role.role != "owner" or not review:
+        await query.answer("Нет доступа или обзор не найден.", show_alert=True)
+        return
+
+    feedback_text = _suggest_feedback_text(review, items)
+    if not feedback_text:
+        await query.answer("Черновик фидбека пуст.", show_alert=True)
+        return
+
+    await query.answer("Отправляю черновик студенту...")
+    await state.clear()
+    try:
+        ok, status = await _finalize_and_send_feedback(
+            bot=query.bot,
+            uow_factory=uow_factory,
+            review_id=review.id,
+            submission_id=submission.id,
+            feedback_text=feedback_text,
+        )
+        await query.message.answer(("✅ " if ok else "⚠️ ") + status)
+    except Exception as exc:
+        await query.message.answer(
+            f"⚠️ Фидбек сохранён, но ошибка при отправке: {html.escape(str(exc))}"
+        )
 
 
 @router.message(ReviewEditStates.waiting_for_edited_text)
@@ -1111,110 +1361,21 @@ async def process_review_feedback(message: Message, state: FSMContext, db_user: 
     data = await state.get_data()
     review_id = data.get("review_id")
     submission_id = data.get("submission_id")
-    review_items = []
-    student_telegram_id = None
-
-    async with uow_factory() as uow:
-        review = await uow.reviews.get_by_id(review_id)
-        submission = await uow.submissions.get_by_id(submission_id)
-        student = await uow.users.get_by_telegram_id(submission.student_id) if submission else None
-        student_telegram_id = student.telegram_id if student else None
-        if review:
-            review_items = await uow.reviews.get_items_by_review(review.id)
-
-        if review:
-            await uow.reviews.update(
-                review.id,
-                teacher_feedback=message.text,
-                feedback_sent_at=datetime.now(timezone.utc),
-                status="finalized",
-            )
-        if submission:
-            await uow.submissions.update(submission.id, status="feedback_sent")
-        await uow.commit()
 
     await state.clear()
-
-    if student_telegram_id:
-        try:
-            # Prepare detailed feedback message
-            feedback_lines = [
-                "📩 <b>Ваша работа проверена!</b>\n",
-                f"<b>Комментарий преподавателя:</b>\n{html.escape(message.text)}\n",
-            ]
-            
-            # Add review items if they exist
-            if review_items:
-                feedback_lines.append("<b>Детали проверки:</b>\n")
-                for idx, item in enumerate(review_items, 1):
-                    severity_icon = {
-                        "error": "❌",
-                        "warning": "⚠️",
-                        "suggestion": "💡",
-                    }.get(item.severity, "📌")
-                    
-                    feedback_lines.append(
-                        f"{severity_icon} <b>{html.escape(item.category)}</b>: {html.escape(item.title)}\n"
-                    )
-                    if item.description:
-                        feedback_lines.append(f"   {html.escape(item.description)}\n")
-                    if item.location:
-                        feedback_lines.append(f"   <i>📍 {html.escape(item.location)}</i>\n")
-                    if item.suggestion:
-                        feedback_lines.append(f"   💡 {html.escape(item.suggestion)}\n")
-                    feedback_lines.append("\n")
-            
-            full_message = "".join(feedback_lines)
-            
-            # Split message if too long (Telegram limit is 4096 chars)
-            if len(full_message) > 4000:
-                # Send summary first
-                summary_msg = "".join(feedback_lines[:3])
-                await message.bot.send_message(
-                    student_telegram_id,
-                    summary_msg,
-                    parse_mode=ParseMode.HTML,
-                )
-                
-                # Send details in chunks
-                current_chunk = []
-                current_length = 0
-                
-                for line in feedback_lines[3:]:
-                    line_length = len(line)
-                    if current_length + line_length > 4000:
-                        if current_chunk:
-                            await message.bot.send_message(
-                                student_telegram_id,
-                                "".join(current_chunk),
-                                parse_mode=ParseMode.HTML,
-                            )
-                        current_chunk = [line]
-                        current_length = line_length
-                    else:
-                        current_chunk.append(line)
-                        current_length += line_length
-                
-                if current_chunk:
-                    await message.bot.send_message(
-                        student_telegram_id,
-                        "".join(current_chunk),
-                        parse_mode=ParseMode.HTML,
-                    )
-            else:
-                await message.bot.send_message(
-                    student_telegram_id,
-                    full_message,
-                    parse_mode=ParseMode.HTML,
-                )
-            
-            await message.answer("✅ Фидбек отправлен студенту.")
-        except Exception as exc:
-            await message.answer(
-                f"⚠️ Фидбек сохранён, но ошибка при отправке: {html.escape(str(exc))}"
-            )
-    else:
-        await message.answer("⚠️ Фидбек сохранён, но студент не найден в базе.")
+    try:
+        ok, status = await _finalize_and_send_feedback(
+            bot=message.bot,
+            uow_factory=uow_factory,
+            review_id=review_id,
+            submission_id=submission_id,
+            feedback_text=message.text,
+        )
+        await message.answer(("✅ " if ok else "⚠️ ") + status)
+    except Exception as exc:
+        await message.answer(
+            f"⚠️ Фидбек сохранён, но ошибка при отправке: {html.escape(str(exc))}"
+        )
 
 
 @router.message(AssignmentEditStates.waiting_for_review_model)
@@ -1498,4 +1659,21 @@ async def process_assignment_deadline(message: Message, state: FSMContext, db_us
         f"📄 <b>{assignment.title}</b>\n"
         f"🗓 Дедлайн: {deadline_str}",
         reply_markup=ReplyKeyboardRemove(),
+    )
+    await message.answer(
+        "Что дальше?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="Открыть задание",
+                callback_data=AssignmentCD(
+                    action="view",
+                    assignment_id=assignment.id,
+                    course_id=assignment.course_id,
+                ).pack(),
+            )],
+            [InlineKeyboardButton(
+                text="К заданиям курса",
+                callback_data=CourseCD(action="assignments", course_id=assignment.course_id).pack(),
+            )],
+        ]),
     )

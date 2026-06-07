@@ -17,3 +17,4 @@ class AgentOutput(BaseModel):
     summary: str
     items: list[ReviewItemOutput]
     strengths: list[str] = []
+    weaknesses: list[str] = []

@@ -33,6 +33,7 @@ class SQLAlchemyReviewRepository(AbstractReviewRepository):
             status=status,
             overall_score=overall_score,
             summary=summary,
+            **kwargs,
         )
         self._session.add(review)
         await self._session.flush()

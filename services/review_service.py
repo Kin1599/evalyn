@@ -113,6 +113,8 @@ async def store_review(
         status="pending_moderation" if isinstance(result, AgentOutput) else "failed",
         overall_score=result.overall_score if isinstance(result, AgentOutput) else None,
         summary=result.summary if isinstance(result, AgentOutput) else str(result),
+        strengths_json=json.dumps(result.strengths, ensure_ascii=False) if isinstance(result, AgentOutput) else None,
+        weaknesses_json=json.dumps(result.weaknesses, ensure_ascii=False) if isinstance(result, AgentOutput) else None,
     )
     if isinstance(result, AgentOutput):
         for item in result.items:

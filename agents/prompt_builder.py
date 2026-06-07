@@ -24,6 +24,7 @@ def build_code_review_prompt(
         "- overall_score: число от 0 до 10\n"
         "- summary: краткий итог проверки\n"
         "- strengths: список сильных сторон\n"
+        "- weaknesses: список слабых сторон или основных зон роста\n"
         "- items: массив замечаний с полями category, severity, title, description, location, suggestion\n\n"
         "Категории: code_style, logic, tests, docs, performance, security. "
         "Значения severity: error, warning, suggestion. "
