@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     bot_token: str
     openrouter_api_key: str = ""
     default_agent_model: str = "qwen/qwen3-coder:free"
+    assignment_review_interval_seconds: int = 300
     sandbox_url: str = "http://sandbox:8001"
     database_url: str
     admin_ids: list[int] = []

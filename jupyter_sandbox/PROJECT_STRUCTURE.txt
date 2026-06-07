@@ -1,0 +1,210 @@
+e:\hw_checker\sandbox\
+├── 📄 README.md                      # Обзор проекта
+├── 📄 IMPLEMENTATION_PLAN.md          # Этап-за-этапом разбор реализации
+├── 📄 pyproject.toml                 # Конфигурация проекта
+├── 📄 requirements.txt                # Зависимости
+│
+├── 📁 sandbox/                        # Основной пакет
+│   ├── 🐍 __init__.py                 # Экспорт публичного API
+│   │
+│   ├── 📍 ЭТАП 1: ФУНДАМЕНТ (✅ ГОТОВ)
+│   ├── 🐍 models.py                   # Dataclasses: CellInfo, CellResult, ...
+│   ├── 🐍 errors.py                   # Исключения: SandboxError, ...
+│   ├── 🐍 utils.py                    # Утилиты: generate_id, hash_requirements, ...
+│   │
+│   ├── 📍 ЭТАП 2: ПРОВАЙДЕРЫ
+│   ├── 🐍 venv_storage.py             # VenvStorage: кэширование окружений
+│   ├── 🐍 gvisor_provider.py          # GVisorProvider: интерфейс к runsc
+│   │
+│   ├── 📍 ЭТАП 3: KERNEL ORCHESTRATOR
+│   ├── 🐍 kernel_orchestrator.py      # KernelOrchestrator: скрипт в контейнере
+│   │
+│   ├── 📍 ЭТАП 4: КОНТЕЙНЕРЫ И МЕНЕДЖЕР
+│   ├── 🐍 container.py                # Container: управление одним контейнером
+│   ├── 🐍 manager.py                  # SandboxManager: главная точка входа
+│   │
+│   └── 📍 ЭТАП 5: СЕССИИ И ИНТЕГРАЦИЯ
+│       └── 🐍 session.py              # SandboxSession: интерфейс для клиента
+│
+├── 📁 tests/                          # Модульные и интеграционные тесты
+│   ├── 🐍 __init__.py
+│   ├── 🐍 conftest.py                 # Pytest fixtures и конфигурация
+│   ├── 🐍 test_models.py              # Тесты моделей (Этап 1) ✅
+│   ├── 🐍 test_utils.py               # (Тесты утилит входят в test_models.py)
+│   ├── 🐍 test_venv_storage.py        # (Этап 2)
+│   ├── 🐍 test_gvisor_provider.py     # (Этап 2)
+│   ├── 🐍 test_container.py           # (Этап 4)
+│   ├── 🐍 test_manager.py             # (Этап 4)
+│   ├── 🐍 test_session.py             # (Этап 5)
+│   └── 🐍 test_integration.py         # (Этап 5)
+│
+├── 📁 examples/                       # Примеры использования
+│   ├── 🐍 basic_usage.py              # Базовый сценарий ✅
+│   └── 🐍 notebook_execution.py       # Выполнение ноутбука ✅
+│
+└── 📁 docs/                           # Документация
+    ├── 📄 architecture.md             # Архитектура компонентов ✅
+    ├── 📄 api.md                      # API Reference ✅
+    └── 📄 installation.md             # Установка и настройка ✅
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+ 5-ЭТАПНЫЙ ПЛАН РЕАЛИЗАЦИИ
+
+═══════════════════════════════════════════════════════════════════════════════
+
+[✅] ЭТАП 1: ФУНДАМЕНТ (200 строк) — ГОТОВ
+    ├── ✅ models.py         — dataclasses CellInfo, CellResult, ImageData, ...
+    ├── ✅ errors.py         — исключения SandboxError, ContainerError, ...
+    ├── ✅ utils.py          — generate_id, hash_requirements, parse_json_line
+    ├── ✅ examples/         — базовые примеры
+    └── ✅ tests/test_models.py — модульные тесты
+
+    СТАТУС: Все компоненты определены и готовы к использованию.
+            На этом этапе создана основа для остальных этапов.
+
+
+[⏳] ЭТАП 2: ПРОВАЙДЕРЫ (500 строк) — ДОЛЖЕН БЫТЬ РЕАЛИЗОВАН
+    ├── [ ] venv_storage.py
+    │       • get_or_create(venv_name, requirements)
+    │       • Кэширование по хэшу
+    │       • uv venv + uv pip install
+    │       • Блокировка дублирования
+    │
+    ├── [ ] gvisor_provider.py
+    │       • start(overlay_lowerdir, workspace_path)
+    │       • stop(process)
+    │       • Параметры: cpu, memory
+    │
+    └── [ ] tests/
+            • test_venv_storage.py (с моками)
+            • test_gvisor_provider.py (с моками runsc)
+
+    РЕЗУЛЬТАТ: Провайдеры полностью функциональны и готовы к использованию
+               в Container и SandboxManager.
+
+
+[⏳] ЭТАП 3: KERNEL ORCHESTRATOR (800 строк) — ДОЛЖЕН БЫТЬ РЕАЛИЗОВАН
+    ├── [ ] kernel_orchestrator.py
+    │       • Главный цикл JSON-RPC (stdin/stdout)
+    │       • create_kernel — запуск ipykernel
+    │       • destroy_kernel — остановка ядра
+    │       • execute — выполнение кода, захват результатов
+    │       • get_variables — парсинг globals()
+    │       • get_variable — pickle сериализация
+    │       • get_images — сбор display_data
+    │       • read_file, write_file — работа с FS
+    │       • shutdown — корректное завершение
+    │
+    └── [ ] tests/test_kernel_orchestrator.py (с моками ipykernel)
+
+    РЕЗУЛЬТАТ: Скрипт, запускаемый в контейнере. Полностью управляет
+               пулом ядер и обрабатывает все команды клиента.
+
+
+[⏳] ЭТАП 4: КОНТЕЙНЕРЫ И МЕНЕДЖЕР (600 строк) — ДОЛЖЕН БЫТЬ РЕАЛИЗОВАН
+    ├── [ ] container.py — Container класс
+    │       • create_kernel() → kernel_id
+    │       • destroy_kernel(kernel_id)
+    │       • send_command(cmd) → ответ
+    │       • Счётчик active_kernels
+    │       • last_activity для TTL
+    │       • shutdown()
+    │
+    ├── [ ] manager.py — SandboxManager класс
+    │       • create_session() — главный метод
+    │       • Пул контейнеров по venv_hash
+    │       • _get_or_create_container()
+    │       • Фоновая задача _cleanup_loop()
+    │       • TTL сессий и контейнеров
+    │       • shutdown()
+    │
+    ├── [ ] tests/test_container.py (с моками процессов)
+    └── [ ] tests/test_manager.py (с моками контейнеров)
+
+    РЕЗУЛЬТАТ: Полное управление жизненным циклом контейнеров и пулом ядер.
+               Готово к интеграции с SandboxSession.
+
+
+[⏳] ЭТАП 5: СЕССИИ И ИНТЕГРАЦИЯ (700 строк) — ДОЛЖЕН БЫТЬ РЕАЛИЗОВАН
+    ├── [ ] session.py — SandboxSession класс
+    │       • execute_cell(cell_id, timeout)
+    │       • execute_code(code, timeout)
+    │       • list_variables(), get_variable()
+    │       • get_images(cell_id)
+    │       • upload_file(), get_file(), list_files()
+    │       • open_notebook(), add_cell(), list_cells()
+    │       • cancel_cell(), shutdown_kernel(), terminate()
+    │       • _check_ttl()
+    │
+    ├── [ ] tests/
+    │       • test_session.py — unit-тесты SandboxSession
+    │       • test_integration.py — интеграционные тесты всего стека
+    │
+    ├── [ ] Документация
+    │       • README полностью заполнен
+    │       • architecture.md — описание взаимодействия
+    │       • api.md — полный API reference
+    │       • installation.md — guide по установке
+    │
+    └── [ ] examples/
+            • basic_usage.py (обновить после реализации)
+            • notebook_execution.py (обновить после реализации)
+
+    РЕЗУЛЬТАТ: Полностью готовая к использованию библиотека с документацией
+               и примерами. Все компоненты интегрированы и протестированы.
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+ Зависимости между этапами
+
+═══════════════════════════════════════════════════════════════════════════════
+
+     [Этап 1: Фундамент]
+            ↓
+     [Этап 2: Провайдеры]
+            ↓
+     [Этап 3: KernelOrchestrator]
+            ↓
+     [Этап 4: Container + Manager]
+            ↓
+     [Этап 5: Session + Интеграция]
+
+Каждый этап зависит от предыдущего, но может разрабатываться независимо.
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+ Примерная временная оценка
+
+═══════════════════════════════════════════════════════════════════════════════
+
+| Этап | Разработка | Тестирование | Всего |
+|------|-----------|--------------|-------|
+|  1   |    1ч     |     1ч       |  2ч   | ✅
+|  2   |    3ч     |     2ч       |  5ч   |
+|  3   |    4ч     |     3ч       |  7ч   |
+|  4   |    3ч     |     2ч       |  5ч   |
+|  5   |    4ч     |     4ч       |  8ч   |
+|------|-----------|--------------|-------|
+| ИТ   |   15ч     |    12ч       | 27ч   |
+
+
+═══════════════════════════════════════════════════════════════════════════════
+
+ Как использовать этот план
+
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Прочитать IMPLEMENTATION_PLAN.md для деталей каждого этапа
+2. Начать с Этапа 2: Провайдеры (Этап 1 уже готов)
+3. После каждого этапа:
+   - Запустить тесты: pytest tests/test_<component>.py -v
+   - Обновить документацию
+   - Создать примеры использования
+   - Выполнить code review
+4. При завершении Этапа 5 — полная готовая библиотека
+
+═══════════════════════════════════════════════════════════════════════════════

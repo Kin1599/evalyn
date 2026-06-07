@@ -24,6 +24,7 @@ class SQLAlchemyReviewRepository(AbstractReviewRepository):
         status: str,
         overall_score: float | None = None,
         summary: str | None = None,
+        **kwargs,
     ) -> Review:
         review = Review(
             submission_id=submission_id,

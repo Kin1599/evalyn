@@ -1,5 +1,5 @@
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
@@ -47,7 +47,7 @@ async def _check_is_teacher(message: Message, db_user: User | None, uow_factory)
     return ok
 
 
-@router.message(F.text == "➕ Создать курс")
+@router.message(StateFilter("*"), F.text == "➕ Создать курс")
 @router.message(Command("new_course"))
 async def btn_create_course(message: Message, state: FSMContext, db_user: User | None, uow_factory) -> None:
     if not await _check_is_teacher(message, db_user, uow_factory):
@@ -91,7 +91,7 @@ async def process_course_name(message: Message, state: FSMContext, db_user: User
     )
 
 
-@router.message(F.text == "🎓 Мои курсы (преподаватель)")
+@router.message(StateFilter("*"), F.text == "🎓 Мои курсы (преподаватель)")
 @router.message(Command("my_courses"))
 async def btn_teacher_courses(message: Message, db_user: User | None, uow_factory) -> None:
     if not db_user:

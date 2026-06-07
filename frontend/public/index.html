@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Evalyn - Проверка лабораторных работ</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            padding: 40px;
+        }
+        
+        header {
+            text-align: center;
+            margin-bottom: 40px;
+            border-bottom: 3px solid #667eea;
+            padding-bottom: 20px;
+        }
+        
+        h1 {
+            color: #333;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        
+        .subtitle {
+            color: #666;
+            font-size: 1.1em;
+        }
+        
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 30px;
+            margin-bottom: 40px;
+        }
+        
+        .card {
+            background: #f8f9fa;
+            border-left: 4px solid #667eea;
+            padding: 25px;
+            border-radius: 8px;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 25px rgba(102, 126, 234, 0.1);
+        }
+        
+        .card h2 {
+            color: #667eea;
+            margin-bottom: 15px;
+            font-size: 1.3em;
+        }
+        
+        .card-content {
+            color: #555;
+            line-height: 1.6;
+        }
+        
+        .btn-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }
+        
+        button, a.btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            text-decoration: none;
+            font-size: 0.95em;
+            transition: all 0.3s ease;
+            display: inline-block;
+        }
+        
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: #5a67d8;
+        }
+        
+        .btn-secondary {
+            background: #e2e8f0;
+            color: #333;
+        }
+        
+        .btn-secondary:hover {
+            background: #cbd5e0;
+        }
+        
+        .status {
+            display: inline-block;
+            padding: 5px 10px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            margin: 5px 5px 5px 0;
+        }
+        
+        .status-active {
+            background: #c6f6d5;
+            color: #22543d;
+        }
+        
+        .status-pending {
+            background: #bee3f8;
+            color: #2c5282;
+        }
+        
+        .status-completed {
+            background: #c6f6d5;
+            color: #22543d;
+        }
+        
+        .section {
+            margin-top: 40px;
+        }
+        
+        .section h3 {
+            color: #333;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #e2e8f0;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #e2e8f0;
+        }
+        
+        th {
+            background: #f8f9fa;
+            color: #333;
+            font-weight: 600;
+        }
+        
+        tr:hover {
+            background: #f8f9fa;
+        }
+        
+        .error {
+            background: #fed7d7;
+            color: #742a2a;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        
+        .success {
+            background: #c6f6d5;
+            color: #22543d;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+        
+        .loading::after {
+            content: '...';
+            animation: dots 1.5s steps(3, end) infinite;
+        }
+        
+        @keyframes dots {
+            0%, 20% { content: '.'; }
+            40% { content: '..'; }
+            60%, 100% { content: '...'; }
+        }
+        
+        .api-status {
+            padding: 15px;
+            background: #edf2f7;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        
+        .api-status.ok {
+            background: #c6f6d5;
+        }
+        
+        .api-status.error {
+            background: #fed7d7;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📚 Evalyn</h1>
+            <p class="subtitle">Платформа для проверки лабораторных работ с AI</p>
+        </header>
+        
+        <div id="api-status" class="api-status">
+            <span id="status-text">Проверка подключения к API...</span>
+        </div>
+        
+        <div class="dashboard">
+            <div class="card">
+                <h2>🎓 Курсы</h2>
+                <div class="card-content">
+                    <p>Управляйте вашими курсами и заданиями.</p>
+                    <div class="btn-group">
+                        <button class="btn-primary" onclick="loadCourses()">Мои курсы</button>
+                        <a href="#courses" class="btn-secondary">Подробнее</a>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>📝 Задания</h2>
+                <div class="card-content">
+                    <p>Просмотр списка заданий и сданных работ.</p>
+                    <div class="btn-group">
+                        <button class="btn-primary" onclick="loadAssignments()">Все задания</button>
+                        <a href="#assignments" class="btn-secondary">Подробнее</a>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>✅ Проверки</h2>
+                <div class="card-content">
+                    <p>Просмотр результатов проверки работ AI.</p>
+                    <div class="btn-group">
+                        <button class="btn-primary" onclick="loadReviews()">Последние проверки</button>
+                        <a href="#reviews" class="btn-secondary">Подробнее</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h3>ℹ️ Информация</h3>
+            <div style="color: #555; line-height: 1.8;">
+                <p><strong>Evalyn</strong> — это платформа для помощи преподавателям в проверке лабораторных работ.</p>
+                <p style="margin-top: 15px;">
+                    <strong>Возможности:</strong>
+                </p>
+                <ul style="margin-left: 20px; margin-top: 10px;">
+                    <li>✨ Автоматическая проверка кода с использованием AI</li>
+                    <li>🔍 Детальный анализ ошибок и рекомендации</li>
+                    <li>📊 Просмотр результатов проверки и статистики</li>
+                    <li>🐍 Безопасное выполнение Python кода в изолированной среде</li>
+                    <li>📚 Поддержка Jupyter ноутбуков</li>
+                    <li>💬 Отправка фидбека студентам через Telegram</li>
+                </ul>
+                <p style="margin-top: 15px;">
+                    <strong>Начните работу:</strong> Используйте кнопки выше для просмотра ваших курсов и заданий.
+                </p>
+            </div>
+        </div>
+        
+        <div id="content" style="margin-top: 40px;"></div>
+    </div>
+    
+    <script>
+        // Check API health
+        async function checkAPI() {
+            try {
+                const response = await fetch('/health');
+                const data = await response.json();
+                const statusEl = document.getElementById('status-text');
+                document.getElementById('api-status').className = 'api-status ok';
+                statusEl.textContent = '✅ API работает нормально';
+            } catch (error) {
+                const statusEl = document.getElementById('status-text');
+                document.getElementById('api-status').className = 'api-status error';
+                statusEl.textContent = '❌ API недоступен. Пожалуйста, убедитесь, что сервер запущен.';
+            }
+        }
+        
+        async function loadCourses() {
+            const contentEl = document.getElementById('content');
+            contentEl.innerHTML = '<div class="loading">Загрузка курсов</div>';
+            
+            try {
+                // For demo, show placeholder
+                contentEl.innerHTML = `
+                    <div class="section">
+                        <h3>Мои курсы</h3>
+                        <p>Для использования этой функции необходима авторизация через Telegram.</p>
+                        <p>В Telegram боте используйте команды:</p>
+                        <ul style="margin-left: 20px; margin-top: 10px;">
+                            <li><code>/my_courses</code> — просмотр ваших курсов</li>
+                            <li><code>/new_course</code> — создать новый курс</li>
+                        </ul>
+                    </div>
+                `;
+            } catch (error) {
+                contentEl.innerHTML = `<div class="error">Ошибка: ${error.message}</div>`;
+            }
+        }
+        
+        async function loadAssignments() {
+            const contentEl = document.getElementById('content');
+            contentEl.innerHTML = '<div class="loading">Загрузка заданий</div>';
+            
+            try {
+                contentEl.innerHTML = `
+                    <div class="section">
+                        <h3>Все задания</h3>
+                        <p>Для просмотра заданий вашего курса выберите курс в Telegram боте.</p>
+                        <p>Используйте команду <code>/my_courses</code> для доступа.</p>
+                    </div>
+                `;
+            } catch (error) {
+                contentEl.innerHTML = `<div class="error">Ошибка: ${error.message}</div>`;
+            }
+        }
+        
+        async function loadReviews() {
+            const contentEl = document.getElementById('content');
+            contentEl.innerHTML = '<div class="loading">Загрузка проверок</div>';
+            
+            try {
+                contentEl.innerHTML = `
+                    <div class="section">
+                        <h3>Результаты проверок</h3>
+                        <p>Здесь будут показываться результаты автоматической проверки работ.</p>
+                        <p>Отправьте работу на проверку в Telegram боте, и результаты появятся здесь.</p>
+                    </div>
+                `;
+            } catch (error) {
+                contentEl.innerHTML = `<div class="error">Ошибка: ${error.message}</div>`;
+            }
+        }
+        
+        // Check API on page load
+        window.addEventListener('load', checkAPI);
+    </script>
+</body>
+</html>

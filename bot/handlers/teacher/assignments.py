@@ -8,6 +8,7 @@ from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
+    Document,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -16,8 +17,6 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 
-from agents.output_schema import AgentOutput
-from agents.reviewer import CodeReviewAgent
 from core.config import settings
 from bot.handlers.teacher.courses import CourseCD
 from bot.states.assignment import AssignmentCreateStates
@@ -25,6 +24,7 @@ from bot.states.review import ReviewEditStates
 from bot.states.submission import SubmissionStates
 from db.models.submission import Submission
 from db.models.user import User
+from services.review_service import run_assignment_review, store_review
 
 router = Router()
 
@@ -80,34 +80,18 @@ async def _run_review_for_submission(
     if not submission_text:
         return False, f"submission {submission.id}: нет текста и файла"
 
-    agent = CodeReviewAgent(model=model)
-    result, raw_output = await agent.review_submission(
-        assignment_title=assignment.title,
-        assignment_description=assignment.description,
-        assignment_criteria=assignment.criteria,
+    review_result = await run_assignment_review(
+        assignment=assignment,
         submission_text=submission_text,
-    )
-
-    review = await uow.reviews.create(
-        submission_id=submission.id,
         model=model,
-        raw_output=raw_output,
-        status="pending_moderation" if isinstance(result, AgentOutput) else "failed",
-        overall_score=result.overall_score if isinstance(result, AgentOutput) else None,
-        summary=result.summary if isinstance(result, AgentOutput) else str(result),
     )
-    if isinstance(result, AgentOutput):
-        for item in result.items:
-            await uow.reviews.create_item(
-                review_id=review.id,
-                category=item.category,
-                severity=item.severity,
-                title=item.title,
-                description=item.description,
-                location=item.location,
-                suggestion=item.suggestion,
-            )
-        await uow.submissions.update(submission.id, status="reviewed")
+    review = await store_review(
+        uow=uow,
+        submission=submission,
+        model=model,
+        result=review_result.outcome,
+        raw_output=review_result.raw_output,
+    )
     return True, f"submission {submission.id}: {review.status}"
 
 
@@ -130,6 +114,18 @@ def _assignments_kb(assignments, course_id: int) -> InlineKeyboardMarkup:
         )
     ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _assignment_review_settings_text(assignment) -> str:
+    model = assignment.review_model or settings.default_agent_model
+    temperature = assignment.review_temperature if assignment.review_temperature is not None else 0.2
+    has_prompt = "да" if getattr(assignment, "review_system_prompt", None) else "нет"
+    return (
+        f"\n\n<b>Настройки проверки:</b>\n"
+        f"Модель: <code>{model}</code>\n"
+        f"Температура: <code>{temperature}</code>\n"
+        f"System prompt задан: <b>{has_prompt}</b>"
+    )
 
 
 @router.callback_query(CourseCD.filter(F.action == "assignments"))
@@ -380,6 +376,8 @@ async def cb_assignment_view(query: CallbackQuery, callback_data: AssignmentCD, 
 
     if getattr(assignment, "is_private", False):
         text += "\n\n🔒 <b>Это приватное задание. Студенты не видят его в общем списке.</b>"
+    else:
+        text += "\n\n🌐 <b>Задание опубликовано.</b>"
 
     buttons = []
     if submission_count:
@@ -391,8 +389,8 @@ async def cb_assignment_view(query: CallbackQuery, callback_data: AssignmentCD, 
         ])
         buttons.append([
             InlineKeyboardButton(
-                text="🤖 Проверить всё задание",
-                callback_data=AssignmentCD(action="review_all", assignment_id=callback_data.assignment_id, course_id=callback_data.course_id).pack(),
+                text="⚡ Проверить сейчас",
+                callback_data=AssignmentCD(action="review_now", assignment_id=callback_data.assignment_id, course_id=callback_data.course_id).pack(),
             )
         ])
     if getattr(assignment, "is_private", False):
@@ -400,6 +398,13 @@ async def cb_assignment_view(query: CallbackQuery, callback_data: AssignmentCD, 
             InlineKeyboardButton(
                 text="🌐 Сделать публичным",
                 callback_data=AssignmentCD(action="make_public", assignment_id=callback_data.assignment_id, course_id=callback_data.course_id).pack(),
+            )
+        ])
+    else:
+        buttons.append([
+            InlineKeyboardButton(
+                text="🔒 Вернуть в черновик",
+                callback_data=AssignmentCD(action="make_private", assignment_id=callback_data.assignment_id, course_id=callback_data.course_id).pack(),
             )
         ])
     # allow owner to perform a test submission without being a student
@@ -473,8 +478,34 @@ async def cb_assignment_make_public(query: CallbackQuery, callback_data: Assignm
     await cb_assignment_view(query, callback_data, db_user, uow_factory)
 
 
-@router.callback_query(AssignmentCD.filter(F.action == "review_all"))
-async def cb_assignment_review_all(query: CallbackQuery, callback_data: AssignmentCD, db_user: User | None, uow_factory) -> None:
+@router.callback_query(AssignmentCD.filter(F.action == "make_private"))
+async def cb_assignment_make_private(query: CallbackQuery, callback_data: AssignmentCD, db_user: User | None, uow_factory) -> None:
+    if not db_user:
+        await query.answer()
+        return
+
+    async with uow_factory() as uow:
+        assignment = await uow.assignments.get_by_id(callback_data.assignment_id)
+        role = await uow.courses.get_role(db_user.telegram_id, callback_data.course_id)
+
+    if not assignment or not role or role.role != "owner":
+        await query.answer("Нет доступа.", show_alert=True)
+        return
+
+    if getattr(assignment, "is_private", False):
+        await query.answer("Задание уже является черновиком.", show_alert=True)
+        return
+
+    async with uow_factory() as uow:
+        await uow.assignments.update(assignment.id, is_private=True)
+        await uow.commit()
+
+    await query.answer("Задание снова стало черновиком.")
+    await cb_assignment_view(query, callback_data, db_user, uow_factory)
+
+
+@router.callback_query(AssignmentCD.filter(F.action == "review_now"))
+async def cb_assignment_review_now(query: CallbackQuery, callback_data: AssignmentCD, db_user: User | None, uow_factory) -> None:
     if not db_user:
         await query.answer()
         return
@@ -490,20 +521,24 @@ async def cb_assignment_review_all(query: CallbackQuery, callback_data: Assignme
 
     pending_submissions = [s for s in submissions if s.status == "pending"]
     if not pending_submissions:
-        await query.answer("Нет новых отправок для проверки.", show_alert=True)
+        await query.answer("Новых работ для проверки нет.", show_alert=True)
         return
 
-    await query.answer("Запускаю проверку новых отправок, подождите...")
-
+    await query.answer("Запускаю проверку сейчас…")
     messages = []
     async with uow_factory() as uow:
         for submission in pending_submissions:
-            success, status_msg = await _run_review_for_submission(query, uow, assignment, submission, settings.default_agent_model)
+            success, status_msg = await _run_review_for_submission(
+                query,
+                uow,
+                assignment,
+                submission,
+                assignment.review_model or settings.default_agent_model,
+            )
             messages.append(status_msg)
         await uow.commit()
 
-    text = "Проверка выполнена для следующих отправок:\n" + "\n".join(messages)
-    await query.message.answer(text)
+    await query.message.answer("Проверка выполнена для следующих отправок:\n" + "\n".join(messages))
 
 
 @router.callback_query(AssignmentCD.filter(F.action == "submissions"))
@@ -652,110 +687,34 @@ async def cb_submission_review(query: CallbackQuery, callback_data: SubmissionCD
 
     submission_text = await _resolve_submission_text(query, submission)
     if not submission_text:
-        await query.answer("Эта работа не содержит текста для анализа.", show_alert=True)
+        await query.answer("Нет доступа к проверке работы этого студента.", show_alert=True)
         return
 
-    # Сохраняем данные для FSM
-    await state.set_state(ReviewEditStates.waiting_for_temperature)
-    await state.update_data(
-        assignment_id=assignment.id,
-        course_id=callback_data.course_id,
-        submission_id=submission.id,
+    await query.answer("Запускаю проверку сейчас")
+    review_result = await run_assignment_review(
+        assignment=assignment,
         submission_text=submission_text,
+        model=settings.default_agent_model,
     )
-    await query.message.answer(
-        "Выберите модель для проверки:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"Default ({settings.default_agent_model})", callback_data="model|{0}".format(settings.default_agent_model))],
-            [InlineKeyboardButton(text="Qwen Code (qwen/qwen3-coder:free)", callback_data="model|qwen/qwen3-coder:free")],
-            [InlineKeyboardButton(text="gpt-4o-mini", callback_data="model|openai/gpt-4o-mini")],
-        ])
-    )
-
-# FSM: выбор модели и температуры
-@router.callback_query(lambda c: c.data and c.data.startswith("model|"), ReviewEditStates.waiting_for_temperature)
-async def cb_choose_model(query: CallbackQuery, state: FSMContext) -> None:
-    model = query.data.split("|", 1)[1]
-    await state.update_data(model=model)
-    await state.set_state(ReviewEditStates.waiting_for_system_prompt)
-    await query.message.answer(
-        "Выберите температуру генерации (чем выше — тем креативнее, но менее предсказуемо):",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="0.2 (по умолчанию)", callback_data="temp|0.2")],
-            [InlineKeyboardButton(text="0.5", callback_data="temp|0.5")],
-            [InlineKeyboardButton(text="0.8", callback_data="temp|0.8")],
-        ])
-    )
-    await query.answer()
-
-@router.callback_query(lambda c: c.data and c.data.startswith("temp|"), ReviewEditStates.waiting_for_system_prompt)
-async def cb_choose_temperature(query: CallbackQuery, state: FSMContext) -> None:
-    temperature = float(query.data.split("|", 1)[1])
-    await state.update_data(temperature=temperature)
-    await state.set_state(ReviewEditStates.waiting_for_system_prompt)
-    await query.message.answer(
-        "Введите system prompt для агента (или отправьте - для значения по умолчанию):"
-    )
-    await query.answer()
-
-@router.message(ReviewEditStates.waiting_for_system_prompt)
-async def cb_enter_system_prompt(message: Message, state: FSMContext, db_user: User | None, uow_factory) -> None:
-    data = await state.get_data()
-    model = data.get("model", settings.default_agent_model)
-    temperature = data.get("temperature", 0.2)
-    system_prompt = message.text.strip() if message.text and message.text.strip() != "-" else None
-    assignment_id = data["assignment_id"]
-    course_id = data["course_id"]
-    submission_id = data["submission_id"]
-    submission_text = data["submission_text"]
-
     async with uow_factory() as uow:
-        assignment = await uow.assignments.get_by_id(assignment_id)
-        submission = await uow.submissions.get_by_id(submission_id)
-    # Передаём параметры в агент
-    agent = CodeReviewAgent(model=model, temperature=temperature, system_prompt=system_prompt)
-    result, raw_output = await agent.review_submission(
-        assignment_title=assignment.title,
-        assignment_description=assignment.description,
-        assignment_criteria=assignment.criteria,
-        submission_text=submission_text,
-        system_prompt=system_prompt,
-    )
-
-    async with uow_factory() as uow:
-        review = await uow.reviews.create(
-            submission_id=submission.id,
-            model=model,
-            raw_output=raw_output,
-            status="pending_moderation" if isinstance(result, AgentOutput) else "failed",
-            overall_score=result.overall_score if isinstance(result, AgentOutput) else None,
-            summary=result.summary if isinstance(result, AgentOutput) else str(result),
-            temperature=temperature,
-            system_prompt=system_prompt,
+        review = await store_review(
+            uow=uow,
+            submission=submission,
+            model=settings.default_agent_model,
+            result=review_result.outcome,
+            raw_output=review_result.raw_output,
         )
-        if isinstance(result, AgentOutput):
-            for item in result.items:
-                await uow.reviews.create_item(
-                    review_id=review.id,
-                    category=item.category,
-                    severity=item.severity,
-                    title=item.title,
-                    description=item.description,
-                    location=item.location,
-                    suggestion=item.suggestion,
-                )
-            await uow.submissions.update(submission.id, status="reviewed")
         await uow.commit()
 
-    await state.clear()
-    if isinstance(result, AgentOutput):
-        await message.answer(
-            f"Ревью выполнено (модель: {model}, температура: {temperature}).\nМожете просмотреть результаты.",
-        )
-    else:
-        await message.answer(
-            "⚠️ Agent returned an unexpected response:\n" + str(result),
-        )
+    await query.message.answer(
+        f"Проверка завершена для работы #{submission.id}.",
+        reply_markup=_review_navigation_kb(
+            review_id=review.id,
+            submission_id=submission.id,
+            assignment_id=assignment.id,
+            course_id=callback_data.course_id,
+        ),
+    )
 
 
 @router.callback_query(SubmissionCD.filter(F.action == "review_summary"))
@@ -910,60 +869,29 @@ async def cb_review_with_model(query: CallbackQuery, callback_data: ReviewModelC
 
     submission_text = await _resolve_submission_text(query, submission)
     if not submission_text:
-        await query.answer("Эта работа не содержит текста для анализа.", show_alert=True)
+        await query.answer("Нет доступа к проверке работы этого студента.", show_alert=True)
         return
 
-    await query.answer("Запрос отправлен агенту, подождите...")
-
-    agent = CodeReviewAgent(model=callback_data.model)
-    result, raw_output = await agent.review_submission(
-        assignment_title=assignment.title,
-        assignment_description=assignment.description,
-        assignment_criteria=assignment.criteria,
-        submission_text=submission_text,
-    )
-
+    await query.answer("Запускаю проверку сейчас...")
     async with uow_factory() as uow:
-        review = await uow.reviews.create(
-            submission_id=submission.id,
+        review_result = await run_assignment_review(
+            assignment=assignment,
+            submission_text=submission_text,
             model=callback_data.model,
-            raw_output=raw_output,
-            status="pending_moderation" if isinstance(result, AgentOutput) else "failed",
-            overall_score=result.overall_score if isinstance(result, AgentOutput) else None,
-            summary=result.summary if isinstance(result, AgentOutput) else str(result),
         )
-        if isinstance(result, AgentOutput):
-            for item in result.items:
-                await uow.reviews.create_item(
-                    review_id=review.id,
-                    category=item.category,
-                    severity=item.severity,
-                    title=item.title,
-                    description=item.description,
-                    location=item.location,
-                    suggestion=item.suggestion,
-                )
-            await uow.submissions.update(submission.id, status="reviewed")
+        review = await store_review(
+            uow=uow,
+            submission=submission,
+            model=callback_data.model,
+            result=review_result.outcome,
+            raw_output=review_result.raw_output,
+        )
         await uow.commit()
 
-    if isinstance(result, AgentOutput):
-        item_lines = []
-        for item in result.items:
-            item_lines.append(
-                f"• <b>{html.escape(item.title)}</b> [{html.escape(item.severity)}]"
-                f"\n{html.escape(item.description)}"
-                f"{f'\nLocation: {html.escape(item.location)}' if item.location else ''}"
-                f"{f'\nSuggestion: {html.escape(item.suggestion)}' if item.suggestion else ''}"
-            )
-
-        summary_text = (
-            f"🤖 Automatic review completed (model: {html.escape(callback_data.model)}):\n"
-            f"Score: <b>{result.overall_score:.1f}/10</b>\n"
-            f"{html.escape(result.summary)}\n\n"
-            f"<b>Strengths:</b> {html.escape(', '.join(result.strengths)) if result.strengths else 'none'}\n\n"
-            f"<b>Items:</b>\n{chr(10).join(item_lines)}"
+    if review_result.outcome:
+        await query.message.answer(
+            f"Автоматическая проверка завершена (model: {callback_data.model}).",
         )
-        await query.message.answer(summary_text, parse_mode=ParseMode.HTML)
         await query.message.answer(
             "Вы можете скорректировать итоговую проверку и отправить студенту финальный фидбек.",
             reply_markup=_review_navigation_kb(
@@ -974,9 +902,7 @@ async def cb_review_with_model(query: CallbackQuery, callback_data: ReviewModelC
             ),
         )
     else:
-        await query.message.answer(
-            "⚠️ Agent returned an unexpected response:\n" + str(result),
-        )
+        await query.message.answer("Agent returned an unexpected response.")
 
 
 @router.callback_query(SubmissionCD.filter(F.action == "send_feedback"))
@@ -1061,17 +987,84 @@ async def process_review_feedback(message: Message, state: FSMContext, db_user: 
 
     if student:
         try:
-            await message.bot.send_message(
-                student.telegram_id,
-                f"📩 Ваше задание было проверено. Вот комментарий от преподавателя:\n\n{message.text}",
-            )
-            await message.answer("Фидбек отправлен студенту.")
-        except Exception:
+            # Prepare detailed feedback message
+            feedback_lines = [
+                "📩 <b>Ваша работа проверена!</b>\n",
+                f"<b>Комментарий преподавателя:</b>\n{html.escape(message.text)}\n",
+            ]
+            
+            # Add review items if they exist
+            if review and review.items:
+                feedback_lines.append("<b>Детали проверки:</b>\n")
+                for idx, item in enumerate(review.items, 1):
+                    severity_icon = {
+                        "error": "❌",
+                        "warning": "⚠️",
+                        "suggestion": "💡",
+                    }.get(item.severity, "📌")
+                    
+                    feedback_lines.append(
+                        f"{severity_icon} <b>{item.category}</b>: {html.escape(item.title)}\n"
+                    )
+                    if item.description:
+                        feedback_lines.append(f"   {html.escape(item.description)}\n")
+                    if item.location:
+                        feedback_lines.append(f"   <i>📍 {html.escape(item.location)}</i>\n")
+                    if item.suggestion:
+                        feedback_lines.append(f"   💡 {html.escape(item.suggestion)}\n")
+                    feedback_lines.append("\n")
+            
+            full_message = "".join(feedback_lines)
+            
+            # Split message if too long (Telegram limit is 4096 chars)
+            if len(full_message) > 4000:
+                # Send summary first
+                summary_msg = "".join(feedback_lines[:3])
+                await message.bot.send_message(
+                    student.telegram_id,
+                    summary_msg,
+                    parse_mode=ParseMode.HTML,
+                )
+                
+                # Send details in chunks
+                current_chunk = []
+                current_length = 0
+                
+                for line in feedback_lines[3:]:
+                    line_length = len(line)
+                    if current_length + line_length > 4000:
+                        if current_chunk:
+                            await message.bot.send_message(
+                                student.telegram_id,
+                                "".join(current_chunk),
+                                parse_mode=ParseMode.HTML,
+                            )
+                        current_chunk = [line]
+                        current_length = line_length
+                    else:
+                        current_chunk.append(line)
+                        current_length += line_length
+                
+                if current_chunk:
+                    await message.bot.send_message(
+                        student.telegram_id,
+                        "".join(current_chunk),
+                        parse_mode=ParseMode.HTML,
+                    )
+            else:
+                await message.bot.send_message(
+                    student.telegram_id,
+                    full_message,
+                    parse_mode=ParseMode.HTML,
+                )
+            
+            await message.answer("✅ Фидбек отправлен студенту.")
+        except Exception as exc:
             await message.answer(
-                "Фидбек сохранён, но не удалось отправить сообщение студенту."
+                f"⚠️ Фидбек сохранён, но ошибка при отправке: {exc}"
             )
     else:
-        await message.answer("Фидбек сохранён, но студент не найден в базе.")
+        await message.answer("⚠️ Фидбек сохранён, но студент не найден в базе.")
 
 
 @router.callback_query(AssignmentCD.filter(F.action == "create"))
@@ -1121,15 +1114,76 @@ async def process_assignment_description(message: Message, state: FSMContext) ->
 @router.message(AssignmentCreateStates.waiting_for_criteria)
 async def process_assignment_criteria(message: Message, state: FSMContext) -> None:
     text = message.text.strip() if message.text else ""
-    criteria = None if text == "Пропустить" else (text or None)
+    criteria = None if text.lower() == "пропустить" else (text or None)
     await state.update_data(criteria=criteria)
+    await state.set_state(AssignmentCreateStates.waiting_for_materials)
+    await message.answer(
+        "Отправьте учебные материалы, текст задания или ссылку, если они есть:",
+        reply_markup=_SKIP_KB,
+    )
+
+
+@router.message(AssignmentCreateStates.waiting_for_materials)
+async def process_assignment_materials(message: Message, state: FSMContext) -> None:
+    text = message.text.strip() if message.text else ""
+    if text.lower() == "пропустить":
+        await state.update_data(materials_text=None, materials_file_id=None, materials_file_name=None)
+    elif message.document:
+        await state.update_data(
+            materials_text=text or None,
+            materials_file_id=message.document.file_id,
+            materials_file_name=message.document.file_name,
+        )
+    elif message.photo:
+        await state.update_data(
+            materials_text=text or None,
+            materials_file_id=message.photo[-1].file_id,
+            materials_file_name=f"photo_{message.photo[-1].file_id}",
+        )
+    else:
+        await state.update_data(materials_text=text or None, materials_file_id=None, materials_file_name=None)
+
+    await state.set_state(AssignmentCreateStates.waiting_for_review_model)
+    await message.answer(
+        "Введите модель проверки или нажмите «Пропустить»:",
+        reply_markup=_SKIP_KB,
+    )
+
+
+@router.message(AssignmentCreateStates.waiting_for_review_model)
+async def process_assignment_review_model(message: Message, state: FSMContext) -> None:
+    text = message.text.strip() if message.text else ""
+    review_model = None if text.lower() == "пропустить" else (text or None)
+    await state.update_data(review_model=review_model)
+    await state.set_state(AssignmentCreateStates.waiting_for_review_temperature)
+    await message.answer("Введите температуру проверки (0.0–1.0) или нажмите «Пропустить»:", reply_markup=_SKIP_KB)
+
+
+@router.message(AssignmentCreateStates.waiting_for_review_temperature)
+async def process_assignment_review_temperature(message: Message, state: FSMContext) -> None:
+    text = message.text.strip() if message.text else ""
+    review_temperature = None
+    if text.lower() != "пропустить":
+        try:
+            review_temperature = float(text)
+        except ValueError:
+            await message.answer("Некорректная температура. Введите число от 0.0 до 1.0, например 0.2, или нажмите «Пропустить»:")
+            return
+    await state.update_data(review_temperature=review_temperature)
+    await state.set_state(AssignmentCreateStates.waiting_for_review_system_prompt)
+    await message.answer("Введите system prompt для проверки или нажмите «Пропустить»:", reply_markup=_SKIP_KB)
+
+
+@router.message(AssignmentCreateStates.waiting_for_review_system_prompt)
+async def process_assignment_review_system_prompt(message: Message, state: FSMContext) -> None:
+    text = message.text.strip() if message.text else ""
+    review_system_prompt = None if text.lower() == "пропустить" else (text or None)
+    await state.update_data(review_system_prompt=review_system_prompt)
     await state.set_state(AssignmentCreateStates.waiting_for_privacy)
     await message.answer(
-        "Это приватное тестовое задание для преподавателя? Ответьте Да или Нет:",
+        "Задание будет создано как черновик. Сделать его приватным сейчас?",
         reply_markup=ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="Да"), KeyboardButton(text="Нет")],
-            ],
+            keyboard=[[KeyboardButton(text="Да"), KeyboardButton(text="Нет")]],
             resize_keyboard=True,
             one_time_keyboard=True,
         ),
@@ -1137,18 +1191,6 @@ async def process_assignment_criteria(message: Message, state: FSMContext) -> No
 
 
 @router.message(AssignmentCreateStates.waiting_for_privacy)
-async def process_assignment_privacy(message: Message, state: FSMContext) -> None:
-    text = message.text.strip().lower() if message.text else ""
-    is_private = text == "да"
-    await state.update_data(is_private=is_private)
-    await state.set_state(AssignmentCreateStates.waiting_for_deadline)
-    await message.answer(
-        "Введите дедлайн в формате ДД.MM.ГГГГ или нажмите «Пропустить»:",
-        reply_markup=_SKIP_KB,
-    )
-
-
-@router.message(AssignmentCreateStates.waiting_for_deadline)
 async def process_assignment_deadline(message: Message, state: FSMContext, db_user: User, uow_factory) -> None:
     text = message.text.strip() if message.text else ""
     deadline = None
@@ -1168,7 +1210,13 @@ async def process_assignment_deadline(message: Message, state: FSMContext, db_us
             title=data["title"],
             description=data["description"],
             criteria=data.get("criteria"),
-            is_private=data.get("is_private", False),
+            materials_text=data.get("materials_text"),
+            materials_file_id=data.get("materials_file_id"),
+            materials_file_name=data.get("materials_file_name"),
+            review_model=data.get("review_model"),
+            review_temperature=data.get("review_temperature"),
+            review_system_prompt=data.get("review_system_prompt"),
+            is_private=True,
             deadline=deadline,
         )
         await uow.commit()

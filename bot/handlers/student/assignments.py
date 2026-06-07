@@ -13,8 +13,7 @@ from aiogram.types import (
 
 from bot.states.submission import SubmissionStates
 from core.config import settings
-from agents.output_schema import AgentOutput
-from agents.reviewer import CodeReviewAgent
+from services.review_service import run_assignment_review, store_review
 from db.models.user import User
 
 router = Router()
@@ -72,6 +71,7 @@ async def cb_assignment_view(query: CallbackQuery, callback_data: StudentAssignm
 
     async with uow_factory() as uow:
         assignment = await uow.assignments.get_by_id(callback_data.assignment_id)
+        course = await uow.courses.get_by_id(callback_data.course_id)
         role = await uow.courses.get_role(db_user.telegram_id, callback_data.course_id)
         submission = await uow.submissions.get_by_student_and_assignment(
             db_user.telegram_id, callback_data.assignment_id
@@ -87,6 +87,10 @@ async def cb_assignment_view(query: CallbackQuery, callback_data: StudentAssignm
 
     if assignment.criteria:
         parts += ["", f"<b>Критерии оценки:</b>\n{assignment.criteria}"]
+    if getattr(assignment, "materials_text", None):
+        parts += ["", f"<b>Материалы:</b>\n{assignment.materials_text}"]
+    if getattr(assignment, "materials_file_name", None):
+        parts += ["", f"<b>Файл-материал:</b> {assignment.materials_file_name}"]
 
     if submission:
         status_label = _STATUS_LABEL.get(submission.status, submission.status)
@@ -174,44 +178,6 @@ async def process_submission(message: Message, state: FSMContext, db_user: User,
             content_text=content_text,
             file_id=file_id,
         )
-        await uow.commit()
-
-        review_started = False
-        submission_text = submission.content_text or ""
-        if not submission_text and submission.file_id:
-            submission_text = await _resolve_submission_text_from_file(message, submission.file_id)
-
-        if submission_text:
-            assignment = await uow.assignments.get_by_id(assignment_id)
-            if assignment:
-                agent = CodeReviewAgent(model=settings.default_agent_model)
-                result, raw_output = await agent.review_submission(
-                    assignment_title=assignment.title,
-                    assignment_description=assignment.description,
-                    assignment_criteria=assignment.criteria,
-                    submission_text=submission_text,
-                )
-                review = await uow.reviews.create(
-                    submission_id=submission.id,
-                    model=settings.default_agent_model,
-                    raw_output=raw_output,
-                    status="pending_moderation" if isinstance(result, AgentOutput) else "failed",
-                    overall_score=result.overall_score if isinstance(result, AgentOutput) else None,
-                    summary=result.summary if isinstance(result, AgentOutput) else str(result),
-                )
-                if isinstance(result, AgentOutput):
-                    for item in result.items:
-                        await uow.reviews.create_item(
-                            review_id=review.id,
-                            category=item.category,
-                            severity=item.severity,
-                            title=item.title,
-                            description=item.description,
-                            location=item.location,
-                            suggestion=item.suggestion,
-                        )
-                    await uow.submissions.update(submission.id, status="reviewed")
-                    review_started = True
         await uow.commit()
 
     await state.clear()

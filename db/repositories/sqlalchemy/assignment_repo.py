@@ -37,6 +37,10 @@ class SQLAlchemyAssignmentRepository(AbstractAssignmentRepository):
         await self._session.delete(assignment)
         return True
 
+    async def get_all(self) -> list[Assignment]:
+        result = await self._session.execute(select(Assignment).order_by(Assignment.created_at))
+        return list(result.scalars().all())
+
     async def get_by_course(self, course_id: int) -> list[Assignment]:
         result = await self._session.execute(
             select(Assignment)

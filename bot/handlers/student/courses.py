@@ -1,5 +1,5 @@
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
@@ -21,7 +21,7 @@ class StudentCourseCD(CallbackData, prefix="student_course"):
     course_id: int
 
 
-@router.message(F.text == "🔑 Вступить в курс по коду")
+@router.message(StateFilter("*"), F.text == "🔑 Вступить в курс по коду")
 @router.message(Command("join_course"))
 async def btn_join_course(message: Message, state: FSMContext, db_user: User | None) -> None:
     if not db_user:
@@ -88,7 +88,7 @@ def _restore_menu(db_user):
     )
 
 
-@router.message(F.text == "📚 Мои курсы (студент)")
+@router.message(StateFilter("*"), F.text == "📚 Мои курсы (студент)")
 @router.message(Command("student_courses"))
 async def btn_student_courses(message: Message, db_user: User | None, uow_factory) -> None:
     if not db_user:

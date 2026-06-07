@@ -1,5 +1,5 @@
 from aiogram import F, Router
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, ReplyKeyboardRemove
 
@@ -47,7 +47,19 @@ async def cmd_start(
         return
 
 
-@router.message(F.text == "🎓 Открыть панель")
+
+@router.message(StateFilter("*"), Command("cancel"))
+@router.message(StateFilter("*"), F.text.casefold() == "отмена")
+async def cancel_any(message: Message, state: FSMContext, db_user: User | None, uow_factory) -> None:
+    await state.clear()
+    if not db_user:
+        await message.answer("Сначала зарегистрируйтесь через /start.")
+        return
+    async with uow_factory() as uow:
+        menu_kwargs = await _build_menu_for_user(db_user, uow)
+    await message.answer("Операция отменена.", reply_markup=build_main_menu(**menu_kwargs))
+
+@router.message(StateFilter("*"), F.text == "🎓 Открыть панель")
 async def btn_open_panel(message: Message, db_user: User | None, uow_factory) -> None:
     if not db_user:
         await message.answer("Сначала зарегистрируйтесь через /start.")

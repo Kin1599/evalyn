@@ -14,16 +14,16 @@ def _extract_json(text: str) -> str:
     start = text.find("{")
     end = text.rfind("}")
     if start == -1 or end == -1:
-        raise ValueError("No JSON object found in model response.")
+        raise ValueError("В ответе модели не найден JSON-объект.")
     return text[start : end + 1]
 
 
 def _sandbox_summary(sandbox: Any) -> str:
     if sandbox.error:
-        return f"Execution was not completed: {sandbox.error}"
+        return f"Выполнение не завершилось: {sandbox.error}"
     if sandbox.timed_out:
-        return "Execution timed out."
-    result = "Execution finished successfully." if sandbox.success else "Execution finished with errors."
+        return "Превышено время выполнения."
+    result = "Выполнение завершено успешно." if sandbox.success else "Выполнение завершено с ошибками."
     if sandbox.stdout:
         result += f"\nstdout:\n{sandbox.stdout}"
     if sandbox.stderr:
@@ -44,6 +44,7 @@ class CodeReviewAgent(BaseAgent):
         assignment_description: str,
         assignment_criteria: str | None,
         submission_text: str,
+        system_prompt: str | None = None,
     ) -> tuple[AgentOutput | str, str]:
         sandbox_summary = None
         if is_python_code(submission_text):
@@ -56,6 +57,7 @@ class CodeReviewAgent(BaseAgent):
             assignment_criteria=assignment_criteria,
             submission_text=submission_text,
             sandbox_summary=sandbox_summary,
+            system_prompt_override=system_prompt,
         )
 
         raw = await chat(
@@ -69,8 +71,8 @@ class CodeReviewAgent(BaseAgent):
             body = json.loads(_extract_json(raw))
         except Exception as exc:
             return (
-                "Unable to parse model response. "
-                "Model response:\n" + raw.strip() + f"\n\nParse error: {exc}",
+                "Не удалось разобрать ответ модели. "
+                "Ответ модели:\n" + raw.strip() + f"\n\nОшибка разбора: {exc}",
                 raw,
             )
 
@@ -78,8 +80,8 @@ class CodeReviewAgent(BaseAgent):
             return AgentOutput.model_validate(body), raw
         except ValidationError as exc:
             return (
-                "Model JSON does not match schema. "
-                "Model response:\n" + raw.strip() + f"\n\nValidation error: {exc}",
+                "JSON модели не соответствует схеме. "
+                "Ответ модели:\n" + raw.strip() + f"\n\nОшибка валидации: {exc}",
                 raw,
             )
 

@@ -1,0 +1,34 @@
+{
+  "rule_id": "intro-notebook-check",
+  "rule_type": "notebook",
+  "stop_on_error": false,
+  "cell_timeout": 30,
+  "sandbox_ttl": 600,
+  "venv_name": "datascience-py311",
+  "requirements": [
+    "ipykernel>=6.29",
+    "jupyter-client>=8.6",
+    "nbformat>=5.9"
+  ],
+  "blocks": [
+    {
+      "id": "has-variables",
+      "description": "Check that notebook defines at least one variable.",
+      "inputs": [
+        {
+          "alias": "answer",
+          "type": "variable",
+          "search_strategy": "auto"
+        }
+      ],
+      "conditions": [
+        {
+          "type": "expression",
+          "expression": "answer is not None",
+          "expected": true,
+          "message": "Expected a variable named `answer` to exist."
+        }
+      ]
+    }
+  ]
+}

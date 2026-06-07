@@ -16,6 +16,7 @@ class AbstractReviewRepository(AbstractRepository[Review]):
         status: str,
         overall_score: float | None = None,
         summary: str | None = None,
+        **kwargs,
     ) -> Review: ...
 
     @abstractmethod

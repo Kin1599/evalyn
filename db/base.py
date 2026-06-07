@@ -14,3 +14,8 @@ class Base(DeclarativeBase):
 async def get_session() -> AsyncSession:
     async with async_session_factory() as session:
         yield session
+
+
+# Alias for FastAPI dependency injection
+get_async_session = get_session
+
